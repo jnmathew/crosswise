@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.env
+
+# Tools & caches
+.pytest_cache/
+.mypy_cache/
+.cache/
+.ipynb_checkpoints/
+
+# Project data
+/data/logs/
+/data/temp/
+/data/output_json/*.tmp
+
+# VS Code
+.vscode/

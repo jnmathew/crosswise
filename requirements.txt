@@ -1,0 +1,6 @@
+# System: install Tesseract binary separately (macOS): brew install tesseract
+pytesseract>=0.3.10
+opencv-python>=4.8.1
+openai>=1.0.0
+python-dotenv>=1.0.1
+mistralai>=0.1.0
