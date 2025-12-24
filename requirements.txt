@@ -1,6 +1,22 @@
 # System: install Tesseract binary separately (macOS): brew install tesseract
+# Core OCR & CV
 pytesseract>=0.3.10
 opencv-python>=4.8.1
+numpy>=1.24.0
+
+# Data validation & models
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# LLM Integration
 openai>=1.0.0
 python-dotenv>=1.0.1
-mistralai>=0.1.0
+
+# CLI & Utils
+click>=8.1.0
+loguru>=0.7.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-asyncio>=0.21.0
