@@ -23,3 +23,6 @@ __pycache__/
 
 # VS Code
 .vscode/
+
+# Claude Code local state
+.claude/
