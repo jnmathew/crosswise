@@ -19,7 +19,12 @@ __pycache__/
 # Project data
 /data/logs/
 /data/temp/
+/data/output/
 /data/output_json/*.tmp
+
+# Development and analysis scripts
+analyze_*.py
+test_black_cells.py
 
 # VS Code
 .vscode/
