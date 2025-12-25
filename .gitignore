@@ -26,6 +26,9 @@ __pycache__/
 analyze_*.py
 test_black_cells.py
 
+# Session-specific documentation
+docs/*_NOTES.md
+
 # VS Code
 .vscode/
 
