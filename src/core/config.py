@@ -20,9 +20,11 @@ class Settings(BaseSettings):
 
     # OCR Configuration
     TESSERACT_CMD: Optional[str] = None  # Auto-detect if None
+    OCR_DPI: int = 350
     DEFAULT_DPI: int = 350
     TARGET_X_HEIGHT: int = 14
     MAX_UPSCALE: float = 3.0
+    OCR_CONFIDENCE_MIN: int = 45  # Minimum confidence threshold (0-100)
 
     # Grid Detection
     MIN_GRID_SIZE: int = 5

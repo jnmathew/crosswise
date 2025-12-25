@@ -1,0 +1,482 @@
+"""
+Image preprocessing utilities for crossword puzzle extraction.
+
+Pipeline:
+1. Load and resize image
+2. Detect puzzle quadrilateral (multi-strategy)
+3. Apply perspective transform to warp to square
+4. Generate grayscale and binary outputs
+"""
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
+
+import cv2
+import numpy as np
+from loguru import logger
+
+from .config import Settings
+
+
+def load_image(path: Path) -> np.ndarray:
+    """Load image from path."""
+    return cv2.imread(str(path))
+
+
+def resize_max(image: np.ndarray, max_dim: int = 1200) -> np.ndarray:
+    """Resize image so maximum dimension is max_dim while preserving aspect ratio."""
+    h, w = image.shape[:2]
+    if max(h, w) <= max_dim:
+        return image
+    scale = max_dim / max(h, w)
+    return cv2.resize(image, (int(w * scale), int(h * scale)))
+
+
+def four_point_transform(image: np.ndarray, pts: np.ndarray, dst_size: int = 1000) -> np.ndarray:
+    """
+    Apply perspective transform to warp quadrilateral to square.
+
+    Args:
+        image: Input image
+        pts: 4x2 array of corner points
+        dst_size: Output image size (square)
+
+    Returns:
+        Warped square image of size (dst_size, dst_size)
+    """
+    rect = order_points(pts)
+    (tl, tr, br, bl) = rect
+    dst = np.array([
+        [0, 0],
+        [dst_size - 1, 0],
+        [dst_size - 1, dst_size - 1],
+        [0, dst_size - 1]
+    ], dtype="float32")
+
+    matrix = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(image, matrix, (dst_size, dst_size))
+    return warped
+
+
+def order_points(pts: np.ndarray) -> np.ndarray:
+    """
+    Order points in clockwise order: top-left, top-right, bottom-right, bottom-left.
+
+    Args:
+        pts: 4x2 array of points
+
+    Returns:
+        Ordered 4x2 array
+    """
+    rect = np.zeros((4, 2), dtype="float32")
+    sums = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(sums)]      # top-left (smallest sum)
+    rect[2] = pts[np.argmax(sums)]      # bottom-right (largest sum)
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]      # top-right (smallest diff)
+    rect[3] = pts[np.argmax(diff)]      # bottom-left (largest diff)
+    return rect
+
+
+def _contour_quad_from_mask(mask: np.ndarray, approx_eps: float = 0.02) -> Optional[np.ndarray]:
+    """
+    Extract largest quadrilateral contour from binary mask.
+
+    Args:
+        mask: Binary mask image
+        approx_eps: Epsilon for contour approximation (fraction of perimeter)
+
+    Returns:
+        4x2 array of corner points, or None if no quad found
+    """
+    contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    for c in contours:
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, approx_eps * peri, True)
+        if len(approx) == 4:
+            return approx.reshape(4, 2).astype("float32")
+    return None
+
+
+def _is_valid_quad(pts: np.ndarray, image_shape: Tuple[int, int, int], min_area_ratio: float = 0.05) -> bool:
+    """
+    Check if quad is valid (not too small).
+
+    Args:
+        pts: 4x2 array of points
+        image_shape: Shape of source image
+        min_area_ratio: Minimum area as fraction of image area
+
+    Returns:
+        True if quad is valid
+    """
+    img_area = image_shape[0] * image_shape[1]
+    area = abs(cv2.contourArea(pts.reshape(4, 1, 2)))
+    if area <= 0:
+        return False
+    ratio = area / float(img_area)
+    return ratio >= min_area_ratio
+
+
+def _line_intersection(line1: Tuple[float, float, float, float],
+                       line2: Tuple[float, float, float, float]) -> Optional[Tuple[float, float]]:
+    """
+    Find intersection point of two lines.
+
+    Args:
+        line1: (x1, y1, x2, y2) for first line
+        line2: (x1, y1, x2, y2) for second line
+
+    Returns:
+        (x, y) intersection point, or None if lines are parallel
+    """
+    x1, y1, x2, y2 = line1
+    x3, y3, x4, y4 = line2
+
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-6:
+        return None
+
+    px = ((x1*y2 - y1*x2) * (x3 - x4) - (x1 - x2) * (x3*y4 - y3*x4)) / denom
+    py = ((x1*y2 - y1*x2) * (y3 - y4) - (y1 - y2) * (x3*y4 - y3*x4)) / denom
+
+    return (px, py)
+
+
+def find_quad_with_hough(image: np.ndarray, approx_quad: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+    """
+    Find puzzle quad using Hough line detection, optionally refined from an approximate quad.
+
+    This method detects actual grid lines rather than the outer boundary,
+    producing better perspective correction for skewed images.
+
+    Algorithm:
+    1. If approx_quad provided, create a mask to focus on that region
+    2. Detect all lines using HoughLinesP
+    3. Classify lines as horizontal or vertical (by angle)
+    4. Find the most consistent grid cluster (lines with regular spacing)
+    5. Select outer boundary lines of the main grid
+    6. Compute 4 intersections = quad corners
+
+    Args:
+        image: Input BGR image
+        approx_quad: Optional approximate quad from contour detection to focus search
+
+    Returns:
+        4x2 array of corner points, or None if detection fails
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+
+    # Create mask if approximate quad provided
+    mask = None
+    if approx_quad is not None:
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(mask, [approx_quad.astype(np.int32)], 255)
+        logger.debug("Hough: Using approximate quad to focus search")
+
+    # Strong edge detection to find grid lines
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 30, 150)
+
+    # Apply mask if provided
+    if mask is not None:
+        edges = cv2.bitwise_and(edges, edges, mask=mask)
+
+    # Hough line detection with stricter parameters
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi/180,
+        threshold=80,  # Lower threshold to catch more lines
+        minLineLength=max(50, min(h, w) // 15),
+        maxLineGap=30
+    )
+
+    if lines is None or len(lines) == 0:
+        logger.debug("Hough: No lines detected")
+        return None
+
+    # Classify lines as horizontal or vertical based on angle
+    horizontal_lines = []
+    vertical_lines = []
+
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+
+        # Calculate angle
+        if x2 - x1 == 0:
+            angle = 90.0
+        else:
+            angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+
+        # Horizontal: angle close to 0 or 180
+        if angle < 15 or angle > 165:
+            horizontal_lines.append((x1, y1, x2, y2, length))
+        # Vertical: angle close to 90
+        elif 75 < angle < 105:
+            vertical_lines.append((x1, y1, x2, y2, length))
+
+    logger.debug(f"Hough: {len(horizontal_lines)} horizontal, {len(vertical_lines)} vertical lines")
+
+    if len(horizontal_lines) < 4 or len(vertical_lines) < 4:
+        logger.debug("Hough: Insufficient lines for grid detection")
+        return None
+
+    # Cluster horizontal lines by y-position (adaptive tolerance based on expected grid cell size)
+    # For a typical crossword, cells are about 1000/20 = 50px, so tolerance should be ~10-15px
+    h_tolerance = max(10, min(h * 0.02, 20))  # 10-20px, max 2% of image height
+    h_clusters = []
+    for x1, y1, x2, y2, length in horizontal_lines:
+        y_avg = (y1 + y2) / 2
+        placed = False
+
+        for cluster in h_clusters:
+            if abs(cluster['y_avg'] - y_avg) < h_tolerance:
+                cluster['lines'].append((x1, y1, x2, y2, length))
+                cluster['y_sum'] += length
+                cluster['y_avg'] = np.mean([l[1] + l[3] for l in cluster['lines']]) / 2
+                placed = True
+                break
+
+        if not placed:
+            h_clusters.append({
+                'y_avg': y_avg,
+                'lines': [(x1, y1, x2, y2, length)],
+                'y_sum': length
+            })
+
+    # Cluster vertical lines by x-position
+    v_tolerance = max(10, min(w * 0.02, 20))
+    v_clusters = []
+    for x1, y1, x2, y2, length in vertical_lines:
+        x_avg = (x1 + x2) / 2
+        placed = False
+
+        for cluster in v_clusters:
+            if abs(cluster['x_avg'] - x_avg) < v_tolerance:
+                cluster['lines'].append((x1, y1, x2, y2, length))
+                cluster['x_sum'] += length
+                cluster['x_avg'] = np.mean([l[0] + l[2] for l in cluster['lines']]) / 2
+                placed = True
+                break
+
+        if not placed:
+            v_clusters.append({
+                'x_avg': x_avg,
+                'lines': [(x1, y1, x2, y2, length)],
+                'x_sum': length
+            })
+
+    # Sort clusters by position
+    h_clusters.sort(key=lambda c: c['y_avg'])
+    v_clusters.sort(key=lambda c: c['x_avg'])
+
+    logger.debug(f"Hough: {len(h_clusters)} h_clusters, {len(v_clusters)} v_clusters")
+
+    if len(h_clusters) < 4 or len(v_clusters) < 4:
+        logger.debug("Hough: Insufficient line clusters for grid")
+        return None
+
+    # Use all detected clusters - assume they're all part of the grid
+    # The clustering already filtered out outliers by requiring tight spacing tolerance
+    h_start, h_end = 0, len(h_clusters)
+    v_start, v_end = 0, len(v_clusters)
+
+    logger.debug(f"Hough: Grid bounds h[{h_start}:{h_end}], v[{v_start}:{v_end}]")
+
+    # Select boundary lines from the main grid region
+    top_h = max(h_clusters[h_start]['lines'], key=lambda l: l[4])[:4]
+    bottom_h = max(h_clusters[h_end-1]['lines'], key=lambda l: l[4])[:4]
+    left_v = max(v_clusters[v_start]['lines'], key=lambda l: l[4])[:4]
+    right_v = max(v_clusters[v_end-1]['lines'], key=lambda l: l[4])[:4]
+
+    # Compute 4 intersections
+    tl = _line_intersection(top_h, left_v)
+    tr = _line_intersection(top_h, right_v)
+    br = _line_intersection(bottom_h, right_v)
+    bl = _line_intersection(bottom_h, left_v)
+
+    if None in [tl, tr, br, bl]:
+        logger.debug("Hough: Failed to compute all intersections")
+        return None
+
+    quad = np.array([tl, tr, br, bl], dtype="float32")
+
+    # Validate quad is reasonable (higher threshold than contour methods)
+    if not _is_valid_quad(quad, image.shape, min_area_ratio=0.15):
+        logger.debug("Hough: Quad failed validation (area too small)")
+        return None
+
+    logger.debug("Hough: Successfully detected quad from grid lines")
+    return quad
+
+
+def adaptive_thresh(gray: np.ndarray) -> np.ndarray:
+    """Apply adaptive thresholding to grayscale image."""
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 3
+    )
+    return thresh
+
+
+def find_largest_quad(image: np.ndarray) -> Tuple[Optional[np.ndarray], np.ndarray, np.ndarray]:
+    """
+    Try multiple strategies to find the puzzle quad.
+
+    Strategies:
+      A) Contour + Hough refinement (best - combines robustness with accuracy)
+      B) Hough line detection alone (for clear grids)
+      C) Canny edges + contour approx (fast fallback)
+      D) Adaptive threshold + morphological close + contour approx
+      E) minAreaRect on largest contour (last resort)
+
+    Args:
+        image: Input BGR image
+
+    Returns:
+        (quad_points, gray, edged) where:
+            - quad_points: 4x2 float32 array or None if not found
+            - gray: Grayscale version of image
+            - edged: Edge detection image for debugging
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edged = cv2.Canny(blur, 50, 150)
+
+    # Strategy A: Get approximate quad from contours, refine with Hough
+    logger.debug("Trying Strategy A: Contour + Hough refinement")
+
+    # Try contour detection first
+    approx_quad = _contour_quad_from_mask(edged, approx_eps=0.02)
+    if approx_quad is None or not _is_valid_quad(approx_quad, image.shape):
+        # Try with adaptive threshold
+        thresh = adaptive_thresh(gray)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        approx_quad = _contour_quad_from_mask(closed, approx_eps=0.03)
+
+    # If we have an approximate quad, refine it with Hough
+    if approx_quad is not None and _is_valid_quad(approx_quad, image.shape):
+        logger.debug("Got approximate quad from contours, refining with Hough")
+        refined_quad = find_quad_with_hough(image, approx_quad=approx_quad)
+        if refined_quad is not None:
+            logger.info("Strategy A succeeded: Contour + Hough refinement")
+            return refined_quad, gray, edged
+        else:
+            logger.debug("Hough refinement failed, using approximate quad")
+            logger.info("Strategy A succeeded (contour only): Using approximate quad")
+            return approx_quad, gray, edged
+
+    # Strategy B: Hough line detection alone
+    logger.debug("Trying Strategy B: Hough line detection alone")
+    quad = find_quad_with_hough(image)
+    if quad is not None:
+        logger.info("Strategy B succeeded: Hough line detection alone")
+        return quad, gray, edged
+
+    # Strategy C: blurred Canny + contour approx (fallback)
+    logger.debug("Trying Strategy C: Canny edges + contour")
+    quad = _contour_quad_from_mask(edged, approx_eps=0.02)
+    if quad is not None and _is_valid_quad(quad, image.shape):
+        logger.info("Strategy C succeeded: Canny edges")
+        return quad, gray, edged
+
+    # Strategy D: adaptive threshold + morphological close
+    logger.debug("Trying Strategy D: Adaptive threshold + morph close")
+    thresh = adaptive_thresh(gray)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    quad = _contour_quad_from_mask(closed, approx_eps=0.03)
+    if quad is not None and _is_valid_quad(quad, image.shape):
+        edged_from_thresh = cv2.Canny(cv2.GaussianBlur(closed, (3, 3), 0), 30, 100)
+        logger.info("Strategy D succeeded: Adaptive threshold + morph close")
+        return quad, gray, edged_from_thresh
+
+    # Strategy E: largest contour -> minAreaRect fallback
+    logger.debug("Trying Strategy E: minAreaRect on largest contour")
+    contours, _ = cv2.findContours(closed.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(largest)
+        box = cv2.boxPoints(rect).astype("float32")
+        if _is_valid_quad(box, image.shape):
+            logger.info("Strategy E succeeded: minAreaRect fallback")
+            return box, gray, edged
+
+    logger.warning("All quad detection strategies failed")
+    return None, gray, edged
+
+
+def preprocess(input_path: Path, config: Settings, manual_quad: Optional[np.ndarray] = None) -> Dict[str, Any]:
+    """
+    Load image, detect puzzle quad, warp to square.
+
+    Args:
+        input_path: Path to input image
+        config: Settings object
+        manual_quad: Optional 4x2 array of manually specified corner points (TL, TR, BR, BL)
+
+    Returns:
+        Dictionary with:
+            - original: np.ndarray (resized original)
+            - warped: np.ndarray (1000x1000 color warped)
+            - warped_gray: np.ndarray (grayscale warped)
+            - warped_thresh: np.ndarray (binary threshold warped)
+            - quad_points: np.ndarray (4x2 corner points)
+            - meta: dict (processing metadata)
+
+    Raises:
+        ValueError: If image cannot be read or quad not found
+    """
+    logger.info(f"Preprocessing {input_path.name}")
+
+    # Load and resize
+    image = load_image(input_path)
+    if image is None:
+        raise ValueError(f"Cannot read image: {input_path}")
+
+    original = resize_max(image, max_dim=1400)
+    logger.debug(f"Resized to {original.shape[:2]}")
+
+    # Find puzzle quad (use manual if provided, otherwise auto-detect)
+    if manual_quad is not None:
+        quad = manual_quad
+        gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+        edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
+        logger.info("Using manually specified quad corners")
+    else:
+        quad, gray, edged = find_largest_quad(original)
+        if quad is None:
+            raise ValueError("Could not detect puzzle quadrilateral")
+
+    # Calculate quad area ratio for metadata
+    img_area = original.shape[0] * original.shape[1]
+    quad_area = abs(cv2.contourArea(quad.reshape(4, 1, 2)))
+    area_ratio = quad_area / img_area
+
+    logger.info(f"Detected quad with area ratio: {area_ratio:.2%}")
+
+    # Warp to square
+    warped = four_point_transform(original, quad, dst_size=1000)
+    warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+    warped_thresh = adaptive_thresh(warped_gray)
+
+    logger.success("Preprocessing complete")
+
+    return {
+        "original": original,
+        "warped": warped,
+        "warped_gray": warped_gray,
+        "warped_thresh": warped_thresh,
+        "quad_points": quad,
+        "meta": {
+            "strategy_used": "multi-strategy",  # Could track which strategy worked
+            "quad_area_ratio": float(area_ratio),
+            "max_dimension": max(original.shape[:2])
+        }
+    }
