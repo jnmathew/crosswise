@@ -440,6 +440,81 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
     cells: List[List[Cell]] = []
     h, w = warped_gray.shape[:2]
 
+    # First pass: collect all cell intensities for adaptive thresholding
+    cell_intensities = []
+    for r in range(num_rows):
+        y0 = ys[r]
+        y1 = ys[r + 1] if r + 1 < len(ys) else h
+
+        for c in range(num_cols):
+            x0 = xs[c]
+            x1 = xs[c + 1] if c + 1 < len(xs) else w
+
+            cell_crop = warped_gray[y0:y1, x0:x1]
+            if cell_crop.size > 0:
+                cell_intensities.append(cell_crop.mean())
+
+    # Compute adaptive threshold using multiple methods and select best
+    if cell_intensities:
+        intensities_array = np.array(cell_intensities)
+
+        # Method 1: Otsu's method
+        intensities_uint8 = intensities_array.astype(np.uint8)
+        otsu_threshold, _ = cv2.threshold(
+            intensities_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+
+        # Method 2: Percentile-based (assume 15-25% of cells are black)
+        # Use 23rd percentile as balanced estimate across different puzzles
+        percentile_threshold = np.percentile(intensities_array, 23)
+
+        # Method 3: Look for gap in intensity distribution (dark vs light cells)
+        # Sort intensities and find largest gap in lower 40% of cells
+        sorted_intensities = np.sort(intensities_array)
+        search_range = int(len(sorted_intensities) * 0.40)  # Look in lower 40%
+        if search_range > 1:
+            diffs = np.diff(sorted_intensities[:search_range])
+            if len(diffs) > 0:
+                gap_idx = np.argmax(diffs)
+                gap_size = diffs[gap_idx]
+                gap_threshold = (sorted_intensities[gap_idx] + sorted_intensities[gap_idx + 1]) / 2
+            else:
+                gap_size = 0
+                gap_threshold = percentile_threshold
+        else:
+            gap_size = 0
+            gap_threshold = percentile_threshold
+
+        # Intelligent selection based on gap size:
+        # - Small gap (3-15 units): indicates subtle but clear threshold → use gap method
+        # - Large gap (>15 units): indicates multiple black cell clusters → use percentile
+        # - Very small gap (<3): noise, use percentile
+        if 40 <= gap_threshold <= 150 and 3 <= gap_size <= 15:
+            threshold = gap_threshold
+            method_used = "gap"
+            logger.debug(f"Using gap method: clean separation with gap of {gap_size:.1f} units")
+        elif 40 <= percentile_threshold <= 150:
+            threshold = percentile_threshold
+            method_used = "percentile"
+            if gap_size > 15:
+                logger.debug(f"Using percentile: large gap ({gap_size:.1f}) suggests multiple clusters")
+        elif 40 <= gap_threshold <= 150:
+            threshold = gap_threshold
+            method_used = "gap_fallback"
+        else:
+            threshold = otsu_threshold
+            method_used = "otsu"
+
+        logger.info(
+            f"Adaptive threshold: {threshold:.1f} (method={method_used}, "
+            f"otsu={otsu_threshold}, percentile={percentile_threshold:.1f}, gap={gap_threshold:.1f}, gap_size={gap_size:.1f})"
+        )
+    else:
+        threshold = 55  # Fallback
+        logger.warning(f"No cells found, using fallback threshold: {threshold}")
+
+    # Second pass: classify cells using adaptive threshold
+    idx = 0
     for r in range(num_rows):
         row_cells = []
         y0 = ys[r]
@@ -452,10 +527,11 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
             # Extract cell crop
             cell_crop = warped_gray[y0:y1, x0:x1]
 
-            # Classify black cell by mean intensity
-            if cell_crop.size > 0:
-                mean_intensity = cell_crop.mean()
-                is_black = bool(mean_intensity < 55)  # Threshold from oldpreprocess.py
+            # Classify using adaptive threshold
+            if cell_crop.size > 0 and idx < len(cell_intensities):
+                mean_intensity = cell_intensities[idx]
+                is_black = bool(mean_intensity < threshold)
+                idx += 1
             else:
                 is_black = False
 
@@ -466,7 +542,7 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
 
     # Count black cells for metadata
     black_count = sum(1 for row in cells for cell in row if cell.is_block)
-    logger.info(f"Classified {black_count} black cells")
+    logger.info(f"Classified {black_count} black cells using threshold={threshold}")
 
     return {
         "cells": cells,
