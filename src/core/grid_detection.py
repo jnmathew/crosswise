@@ -485,14 +485,19 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
             gap_size = 0
             gap_threshold = percentile_threshold
 
-        # Intelligent selection based on gap size:
+        # Intelligent selection based on gap size and Otsu:
         # - Small gap (3-15 units): indicates subtle but clear threshold → use gap method
-        # - Large gap (>15 units): indicates multiple black cell clusters → use percentile
-        # - Very small gap (<3): noise, use percentile
+        # - Large gap (>15 units): check if Otsu is reasonable, otherwise use percentile
+        # - Very small gap (<3): use Otsu if in range, otherwise percentile
         if 40 <= gap_threshold <= 150 and 3 <= gap_size <= 15:
             threshold = gap_threshold
             method_used = "gap"
             logger.debug(f"Using gap method: clean separation with gap of {gap_size:.1f} units")
+        elif 40 <= otsu_threshold <= 120:
+            # Prefer Otsu when it's in a reasonable range (40-120)
+            threshold = otsu_threshold
+            method_used = "otsu"
+            logger.debug(f"Using Otsu: threshold in reasonable range ({otsu_threshold:.1f})")
         elif 40 <= percentile_threshold <= 150:
             threshold = percentile_threshold
             method_used = "percentile"
@@ -503,7 +508,7 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
             method_used = "gap_fallback"
         else:
             threshold = otsu_threshold
-            method_used = "otsu"
+            method_used = "otsu_fallback"
 
         logger.info(
             f"Adaptive threshold: {threshold:.1f} (method={method_used}, "
