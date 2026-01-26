@@ -19,7 +19,8 @@ class CrosswordClues(BaseModel):
     DOWN: List[Clue]
 
 # ---- 2) Encode your image as base64 ----
-with open("./IMG_5526_masked_divided.JPG", "rb") as f:
+image_path = "./IMG_5527 copy_masked_divided.JPG"
+with open(image_path, "rb") as f:
     img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
 # ---- 3) Create client ----
@@ -34,4 +35,45 @@ with Mistral(api_key=os.getenv("MISTRAL_API_KEY", "")) as mistral:
         include_image_base64=False,
     )
 
-    print(res)
+    # ---- 4) Save results to markdown ----
+    output_file = "./IMG_5527_manual_ocr_results.md"
+    with open(output_file, "w") as f:
+        f.write(f"# OCR Results - {os.path.basename(image_path)}\n\n")
+
+        if hasattr(res, 'document_annotation') and res.document_annotation:
+            import json
+
+            # Parse the JSON string if it's a string
+            if isinstance(res.document_annotation, str):
+                clues = json.loads(res.document_annotation)
+            else:
+                clues = res.document_annotation
+
+            # Handle dict or object
+            if isinstance(clues, dict):
+                f.write("## ACROSS\n\n")
+                for clue in clues.get('ACROSS', []):
+                    if isinstance(clue, dict):
+                        f.write(f"{clue['num']}. {clue['clue']}\n")
+                    else:
+                        f.write(f"{clue.num}. {clue.clue}\n")
+
+                f.write("\n## DOWN\n\n")
+                for clue in clues.get('DOWN', []):
+                    if isinstance(clue, dict):
+                        f.write(f"{clue['num']}. {clue['clue']}\n")
+                    else:
+                        f.write(f"{clue.num}. {clue.clue}\n")
+            else:
+                f.write("## ACROSS\n\n")
+                for clue in clues.ACROSS:
+                    f.write(f"{clue.num}. {clue.clue}\n")
+
+                f.write("\n## DOWN\n\n")
+                for clue in clues.DOWN:
+                    f.write(f"{clue.num}. {clue.clue}\n")
+        else:
+            f.write("No structured data found.\n\n")
+            f.write(f"Raw response:\n```\n{res}\n```\n")
+
+    print(f"Results saved to {output_file}")
