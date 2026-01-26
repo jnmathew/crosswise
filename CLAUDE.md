@@ -22,6 +22,52 @@ Core dependencies:
 
 ## Architecture
 
+### Grid Detection (`src/core/`)
+
+**grid_detection.py** - Crossword grid extraction from newspaper images:
+- Adaptive threshold selection with multiple fallback strategies (gap, percentile, Otsu)
+- Quad detection and perspective transformation
+- Black cell classification for grid structure analysis
+
+**image_preprocessing.py** - General image preprocessing utilities:
+- Four-point perspective transform for grid warping
+- Rotation correction (detects and fixes grid alignment using Hough line detection)
+- Contour analysis and quadrilateral extraction
+
+**clue_column_detector.py** - Multi-column layout detection for clue extraction:
+- Hybrid column detection combining vertical projection and text clustering
+- Handles both full-height and partial-height columns
+- Automatic separator line placement between detected columns
+- Optional non-text region masking
+
+### Interactive Tools (`src/examples/`)
+
+**interactive_masker.py** - GUI tool for manual preprocessing:
+- MASK mode: Draw white rectangles over unwanted areas (grids, ads, acrostics)
+- SEPARATOR mode: Place aqua/cyan vertical lines between clue columns
+- Save/load coordinates as JSON for reproducible preprocessing
+- Press 'v' to toggle modes, 's' to save, 'u' to undo, 'c' to clear
+
+**process_masked_image.py** - Automated post-masking pipeline:
+- Loads manually masked images
+- Applies automatic column detection if needed
+- Draws separator lines and saves preprocessed images
+- Optional Mistral OCR integration with `--run-ocr` flag
+
+See `src/examples/COLUMN_DETECTION_WORKFLOW.md` for complete usage guide.
+
+### OCR Integration
+
+**Tesseract OCR** (`src/pipeline/`) - Traditional OCR for grid digit extraction:
+- Used for extracting clue numbers from grid cells
+- Requires local Tesseract installation
+
+**Mistral OCR API** (`src/examples/mistralv2.py`) - Modern OCR for clue text extraction:
+- Better accuracy for multi-column newspaper layouts
+- Structured output using Pydantic models
+- Handles complex layouts with separator guidance
+- Requires MISTRAL_API_KEY environment variable
+
 ### OCR Pipeline (`src/pipeline/`)
 
 The pipeline consists of preprocessing utilities designed to improve OCR accuracy on challenging inputs:
@@ -39,9 +85,25 @@ The pipeline consists of preprocessing utilities designed to improve OCR accurac
 - Adaptive thresholding tuned for small text strokes
 - DPI defaults to 350 for Tesseract (adjustable per use case)
 
+## Complete Workflow
+
+For extracting crossword clues from newspaper images:
+
+1. **Grid Detection**: Use `grid_detection.py` to locate and extract the crossword grid
+2. **Manual Masking**: Run `interactive_masker.py` to:
+   - Draw white rectangles over grids, ads, and irrelevant content
+   - Place aqua separator lines between clue columns
+   - Save preprocessing coordinates for reuse
+3. **OCR Extraction**: Use Mistral OCR on the masked image to extract structured clues
+4. **Output**: Get ACROSS and DOWN clues with numbers in markdown format
+
+The manual masking approach ensures accurate column separation, preventing OCR from reading across columns.
+
 ## Development Notes
 
 - Constants follow ALL_CAPS naming convention (e.g., `DEFAULT_DPI`, `TARGET_X_HEIGHT`)
 - Image processing uses grayscale conversion with careful handling of both color and grayscale inputs
 - Scale factors capped at 3.0× maximum to prevent excessive upscaling
 - Fallback strategies implemented (adaptive → Otsu thresholding) when component detection fails
+- Aqua/cyan (BGR: 255, 255, 0) used for separator lines - visible over white masks and gray newspaper
+- Separator width: 4px for clear visibility in preprocessed images
