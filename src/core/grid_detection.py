@@ -559,3 +559,137 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
             "black_cells": black_count
         }
     }
+
+
+def _is_white(cells: List[List[Cell]], row: int, col: int) -> bool:
+    """Check if cell at position is white (not a block). Out of bounds = False."""
+    if row < 0 or col < 0:
+        return False
+    if row >= len(cells) or col >= len(cells[0]):
+        return False
+    return not cells[row][col].is_block
+
+
+def _is_block_or_edge(cells: List[List[Cell]], row: int, col: int) -> bool:
+    """Check if cell at position is a block or out of bounds (edge)."""
+    if row < 0 or col < 0:
+        return True
+    if row >= len(cells) or col >= len(cells[0]):
+        return True
+    return cells[row][col].is_block
+
+
+def assign_clue_numbers(cells: List[List[Cell]]) -> int:
+    """
+    Assign clue numbers to cells based on standard crossword rules.
+
+    A cell receives a number if it's white and starts an ACROSS or DOWN word:
+    - Starts ACROSS: left is block/edge AND right is white
+    - Starts DOWN: above is block/edge AND below is white
+
+    Numbers are assigned sequentially, scanning top-to-bottom, left-to-right.
+
+    Args:
+        cells: 2D grid of Cell objects (modified in place)
+
+    Returns:
+        Total count of numbered cells
+    """
+    if not cells or not cells[0]:
+        return 0
+
+    number = 1
+    for row_idx, row in enumerate(cells):
+        for col_idx, cell in enumerate(row):
+            if cell.is_block:
+                continue
+
+            # Check if this cell starts an ACROSS word
+            starts_across = (
+                _is_block_or_edge(cells, row_idx, col_idx - 1) and
+                _is_white(cells, row_idx, col_idx + 1)
+            )
+
+            # Check if this cell starts a DOWN word
+            starts_down = (
+                _is_block_or_edge(cells, row_idx - 1, col_idx) and
+                _is_white(cells, row_idx + 1, col_idx)
+            )
+
+            if starts_across or starts_down:
+                cell.clue_number = number
+                number += 1
+
+    total_numbered = number - 1
+    logger.info(f"Assigned clue numbers 1-{total_numbered}")
+    return total_numbered
+
+
+def compute_clue_slots(cells: List[List[Cell]]) -> List[Dict[str, Any]]:
+    """
+    Compute all clue slots from a numbered grid.
+
+    For each numbered cell, determines if it starts an ACROSS and/or DOWN
+    word, and computes the answer length by counting cells until hitting
+    a block or edge.
+
+    Args:
+        cells: 2D grid of Cell objects with clue_number assigned
+
+    Returns:
+        List of clue slot dicts:
+        {
+            "number": int,
+            "direction": "across" | "down",
+            "start": (row, col),
+            "length": int
+        }
+    """
+    if not cells or not cells[0]:
+        return []
+
+    num_rows = len(cells)
+    num_cols = len(cells[0])
+    slots = []
+
+    for row_idx, row in enumerate(cells):
+        for col_idx, cell in enumerate(row):
+            if cell.clue_number is None:
+                continue
+
+            # Check for ACROSS slot
+            if (_is_block_or_edge(cells, row_idx, col_idx - 1) and
+                _is_white(cells, row_idx, col_idx + 1)):
+                # Count length
+                length = 0
+                c = col_idx
+                while c < num_cols and _is_white(cells, row_idx, c):
+                    length += 1
+                    c += 1
+
+                slots.append({
+                    "number": cell.clue_number,
+                    "direction": "across",
+                    "start": (row_idx, col_idx),
+                    "length": length
+                })
+
+            # Check for DOWN slot
+            if (_is_block_or_edge(cells, row_idx - 1, col_idx) and
+                _is_white(cells, row_idx + 1, col_idx)):
+                # Count length
+                length = 0
+                r = row_idx
+                while r < num_rows and _is_white(cells, r, col_idx):
+                    length += 1
+                    r += 1
+
+                slots.append({
+                    "number": cell.clue_number,
+                    "direction": "down",
+                    "start": (row_idx, col_idx),
+                    "length": length
+                })
+
+    logger.info(f"Computed {len(slots)} clue slots ({sum(1 for s in slots if s['direction'] == 'across')} across, {sum(1 for s in slots if s['direction'] == 'down')} down)")
+    return slots

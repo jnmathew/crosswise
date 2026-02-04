@@ -153,6 +153,205 @@ def correct_rotation(image: np.ndarray) -> Tuple[np.ndarray, float]:
     return rotated, rotation_angle
 
 
+def detect_page_boundaries(image: np.ndarray, min_area_ratio: float = 0.3) -> Optional[np.ndarray]:
+    """
+    Detect newspaper/document page boundaries for perspective correction.
+
+    Uses multiple strategies to find the page quad:
+    1. Edge detection + largest quadrilateral contour
+    2. Threshold-based detection (light page on dark background)
+    3. Text density analysis (find bounding region of text content)
+
+    Args:
+        image: Input BGR image
+        min_area_ratio: Minimum area of detected quad as fraction of image (default 0.3)
+
+    Returns:
+        4x2 array of corner points (TL, TR, BR, BL), or None if not detected
+    """
+    h, w = image.shape[:2]
+    img_area = h * w
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Strategy 1: Edge-based detection
+    # Good for scans with visible page edges against scanner bed
+    logger.debug("Page detection: Trying edge-based strategy")
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 30, 100)
+
+    # Dilate edges to connect broken lines
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    edges_dilated = cv2.dilate(edges, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(edges_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if contours:
+        # Sort by area, try largest contours first
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+        for contour in contours[:5]:  # Check top 5 largest
+            area = cv2.contourArea(contour)
+            if area < img_area * min_area_ratio:
+                continue
+
+            # Approximate to polygon
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+
+            if len(approx) == 4:
+                quad = approx.reshape(4, 2).astype("float32")
+                logger.info("Page detection: Found quad via edge detection")
+                return order_points(quad)
+
+    # Strategy 2: Threshold-based (light content on dark background)
+    logger.debug("Page detection: Trying threshold-based strategy")
+
+    # Assume page content is lighter than background (scanner bed, dark margins)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Clean up with morphological operations
+    kernel_large = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
+    thresh_closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_large)
+    thresh_opened = cv2.morphologyEx(thresh_closed, cv2.MORPH_OPEN, kernel_large)
+
+    contours, _ = cv2.findContours(thresh_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+
+        if area >= img_area * min_area_ratio:
+            peri = cv2.arcLength(largest, True)
+            approx = cv2.approxPolyDP(largest, 0.02 * peri, True)
+
+            if len(approx) == 4:
+                quad = approx.reshape(4, 2).astype("float32")
+                logger.info("Page detection: Found quad via threshold detection")
+                return order_points(quad)
+
+            # If not a clean quad, use minAreaRect
+            rect = cv2.minAreaRect(largest)
+            box = cv2.boxPoints(rect).astype("float32")
+            logger.info("Page detection: Found quad via minAreaRect")
+            return order_points(box)
+
+    # Strategy 3: Text density - find bounding box of text regions
+    logger.debug("Page detection: Trying text density strategy")
+
+    # Detect text regions using MSER or simple threshold
+    _, text_thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    # Find bounding box of all white pixels (text)
+    coords = cv2.findNonZero(text_thresh)
+    if coords is not None and len(coords) > 100:
+        rect = cv2.minAreaRect(coords)
+        box = cv2.boxPoints(rect).astype("float32")
+
+        # Check if area is sufficient
+        box_area = cv2.contourArea(box)
+        if box_area >= img_area * min_area_ratio:
+            logger.info("Page detection: Found quad via text density")
+            return order_points(box)
+
+    logger.warning("Page detection: Could not detect page boundaries")
+    return None
+
+
+def correct_page_perspective(
+    image: np.ndarray,
+    manual_corners: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, Optional[np.ndarray], Dict[str, Any]]:
+    """
+    Detect page boundaries and apply perspective correction to straighten the page.
+
+    Unlike grid warping (which outputs a fixed 1000x1000), this preserves the
+    original aspect ratio while correcting perspective distortion.
+
+    Args:
+        image: Input BGR image
+        manual_corners: Optional 4x2 array of manually specified corners
+
+    Returns:
+        Tuple of:
+        - Corrected image (or original if no correction needed)
+        - Detected/used quad points (or None)
+        - Metadata dict with correction info
+    """
+    h, w = image.shape[:2]
+    meta = {
+        "correction_applied": False,
+        "detection_method": None,
+        "quad_points": None
+    }
+
+    # Use manual corners if provided
+    if manual_corners is not None:
+        quad = order_points(manual_corners.astype("float32"))
+        meta["detection_method"] = "manual"
+    else:
+        # Auto-detect page boundaries
+        quad = detect_page_boundaries(image)
+        if quad is None:
+            logger.info("No page boundaries detected, skipping perspective correction")
+            return image, None, meta
+        meta["detection_method"] = "auto"
+
+    meta["quad_points"] = quad.tolist()
+
+    # Check if correction is actually needed
+    # If the quad is nearly rectangular and axis-aligned, skip correction
+    ordered = quad  # Already ordered: TL, TR, BR, BL
+    tl, tr, br, bl = ordered
+
+    # Calculate angles of top and bottom edges
+    top_angle = np.degrees(np.arctan2(tr[1] - tl[1], tr[0] - tl[0]))
+    bottom_angle = np.degrees(np.arctan2(br[1] - bl[1], br[0] - bl[0]))
+    left_angle = np.degrees(np.arctan2(bl[1] - tl[1], bl[0] - tl[0]))
+    right_angle = np.degrees(np.arctan2(br[1] - tr[1], br[0] - tr[0]))
+
+    # Check if edges are nearly horizontal/vertical (within 1 degree)
+    horizontal_ok = abs(top_angle) < 1.0 and abs(bottom_angle) < 1.0
+    vertical_ok = abs(left_angle - 90) < 1.0 and abs(right_angle - 90) < 1.0
+
+    if horizontal_ok and vertical_ok:
+        logger.info("Page already well-aligned, skipping perspective correction")
+        return image, quad, meta
+
+    # Calculate output dimensions preserving aspect ratio
+    width_top = np.linalg.norm(tr - tl)
+    width_bottom = np.linalg.norm(br - bl)
+    height_left = np.linalg.norm(bl - tl)
+    height_right = np.linalg.norm(br - tr)
+
+    out_w = int(max(width_top, width_bottom))
+    out_h = int(max(height_left, height_right))
+
+    # Destination points for perspective transform
+    dst = np.array([
+        [0, 0],
+        [out_w - 1, 0],
+        [out_w - 1, out_h - 1],
+        [0, out_h - 1]
+    ], dtype="float32")
+
+    # Apply perspective transform
+    matrix = cv2.getPerspectiveTransform(quad, dst)
+    corrected = cv2.warpPerspective(image, matrix, (out_w, out_h))
+
+    meta["correction_applied"] = True
+    meta["output_size"] = (out_w, out_h)
+    meta["angles"] = {
+        "top": float(top_angle),
+        "bottom": float(bottom_angle),
+        "left": float(left_angle),
+        "right": float(right_angle)
+    }
+
+    logger.info(f"Applied perspective correction: {w}x{h} -> {out_w}x{out_h}")
+    return corrected, quad, meta
+
+
 def _contour_quad_from_mask(mask: np.ndarray, approx_eps: float = 0.02) -> Optional[np.ndarray]:
     """
     Extract largest quadrilateral contour from binary mask.

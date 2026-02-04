@@ -43,13 +43,14 @@ class InteractiveMasker:
 
         self.working_image = self.original.copy()
         self.rectangles = []  # List of (x1, y1, x2, y2) in original coordinates
-        self.separators = []  # List of x-coordinates for vertical separators
+        self.separators = []  # List of ((x1, y1), (x2, y2)) for line endpoints in original coordinates
 
         # Drawing state
         self.mode = "mask"  # "mask" or "separator"
         self.drawing = False
         self.start_point = None
         self.current_point = None
+        self.separator_start = None  # First point of separator line (display coords)
 
         # Window setup
         self.window_name = "Interactive Masker - Draw masks and separators"
@@ -71,8 +72,9 @@ class InteractiveMasker:
         print("MASK MODE (draw white rectangles):")
         print("  - Click and drag to draw white rectangles over unwanted areas")
         print("")
-        print("SEPARATOR MODE (draw vertical lines):")
-        print("  - Click to place aqua vertical separator line")
+        print("SEPARATOR MODE (draw separator lines):")
+        print("  - Click first point, then click second point to draw line")
+        print("  - Lines can be tilted to match column angles")
         print("")
         print("General:")
         print("  - 's' : Save image with masks and separators")
@@ -129,17 +131,31 @@ class InteractiveMasker:
                 self.current_point = None
 
         elif self.mode == "separator":
-            # SEPARATOR MODE: Single click to place vertical line
+            # SEPARATOR MODE: Click two points to draw a (possibly tilted) line
             if event == cv2.EVENT_LBUTTONDOWN:
-                # Convert to original coordinates
-                x_orig, _ = self.scale_point(x, y, to_original=True)
+                if self.separator_start is None:
+                    # First click - start point
+                    self.separator_start = (x, y)
+                    logger.info(f"Separator start point: ({x}, {y}) - click second point")
+                else:
+                    # Second click - end point, create the separator
+                    x1_orig, y1_orig = self.scale_point(*self.separator_start, to_original=True)
+                    x2_orig, y2_orig = self.scale_point(x, y, to_original=True)
 
-                # Add separator
-                self.separators.append(x_orig)
-                logger.info(f"Added separator at x={x_orig}")
+                    # Add separator as two endpoints
+                    self.separators.append(((x1_orig, y1_orig), (x2_orig, y2_orig)))
+                    logger.info(f"Added separator: ({x1_orig}, {y1_orig}) to ({x2_orig}, {y2_orig})")
 
-                # Apply masks and separators
-                self.apply_all()
+                    # Reset separator start
+                    self.separator_start = None
+
+                    # Apply masks and separators
+                    self.apply_all()
+
+            elif event == cv2.EVENT_MOUSEMOVE:
+                # Update current point for preview while drawing separator
+                if self.separator_start is not None:
+                    self.current_point = (x, y)
 
     def apply_all(self):
         """Apply all rectangle masks and separators to the image."""
@@ -149,10 +165,10 @@ class InteractiveMasker:
         for x1, y1, x2, y2 in self.rectangles:
             cv2.rectangle(self.working_image, (x1, y1), (x2, y2), (255, 255, 255), -1)
 
-        # Apply aqua separators
-        h = self.working_image.shape[0]
-        for x in self.separators:
-            cv2.line(self.working_image, (x, 0), (x, h), (255, 255, 0), 4)  # Aqua/cyan, 4px wide
+        # Apply aqua separators (8px wide for clear OCR guidance)
+        for sep in self.separators:
+            (x1, y1), (x2, y2) = sep
+            cv2.line(self.working_image, (x1, y1), (x2, y2), (255, 255, 0), 8)  # Aqua/cyan, 8px wide
 
     def get_display_image(self):
         """Get current display image with masks, separators, and preview."""
@@ -172,6 +188,15 @@ class InteractiveMasker:
             # Draw semi-transparent preview
             cv2.rectangle(display, (x1, y1), (x2, y2), (255, 255, 255), 2)
 
+        # Draw preview line if currently drawing separator
+        if self.mode == "separator" and self.separator_start and self.current_point:
+            x1, y1 = self.separator_start
+            x2, y2 = self.current_point
+            # Draw preview line
+            cv2.line(display, (x1, y1), (x2, y2), (255, 255, 0), 2)
+            # Draw start point marker
+            cv2.circle(display, (x1, y1), 5, (0, 255, 0), -1)
+
         # Add instruction text
         font = cv2.FONT_HERSHEY_SIMPLEX
         mode_color = (0, 255, 0) if self.mode == "mask" else (255, 255, 0)  # Green for mask, cyan for separator
@@ -187,6 +212,13 @@ class InteractiveMasker:
 
     def undo_last(self):
         """Remove the last action (rectangle or separator)."""
+        # If currently drawing a separator, cancel it first
+        if self.mode == "separator" and self.separator_start is not None:
+            self.separator_start = None
+            self.current_point = None
+            logger.info("Cancelled separator in progress")
+            return
+
         # Remove the most recent action based on current mode
         if self.mode == "mask" and self.rectangles:
             removed = self.rectangles.pop()
@@ -194,7 +226,8 @@ class InteractiveMasker:
             self.apply_all()
         elif self.mode == "separator" and self.separators:
             removed = self.separators.pop()
-            logger.info(f"Undid separator at x={removed}")
+            (x1, y1), (x2, y2) = removed
+            logger.info(f"Undid separator: ({x1}, {y1}) to ({x2}, {y2})")
             self.apply_all()
         else:
             logger.warning(f"No {self.mode}s to undo")
@@ -208,6 +241,8 @@ class InteractiveMasker:
             logger.info(f"Cleared {rect_count} rectangles and {sep_count} separators")
             self.rectangles = []
             self.separators = []
+            self.separator_start = None
+            self.current_point = None
             self.working_image = self.original.copy()
         else:
             logger.warning("Nothing to clear")
@@ -240,7 +275,10 @@ class InteractiveMasker:
                 {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
                 for x1, y1, x2, y2 in self.rectangles
             ],
-            "separators": self.separators
+            "separators": [
+                {"x1": p1[0], "y1": p1[1], "x2": p2[0], "y2": p2[1]}
+                for p1, p2 in self.separators
+            ]
         }
 
         with open(output_coords_path, 'w') as f:
@@ -272,8 +310,21 @@ class InteractiveMasker:
             for rect in coords_data.get("rectangles", [])
         ]
 
-        # Load separators (if present)
-        self.separators = coords_data.get("separators", [])
+        # Load separators (if present) - handle both old and new formats
+        raw_separators = coords_data.get("separators", [])
+        self.separators = []
+        h = self.original.shape[0]
+
+        for sep in raw_separators:
+            if isinstance(sep, int):
+                # Old format: just x-coordinate, convert to full-height vertical line
+                self.separators.append(((sep, 0), (sep, h)))
+            elif isinstance(sep, dict):
+                # New format: dict with x1, y1, x2, y2
+                self.separators.append(((sep["x1"], sep["y1"]), (sep["x2"], sep["y2"])))
+            elif isinstance(sep, (list, tuple)) and len(sep) == 2:
+                # New format as tuple/list: ((x1, y1), (x2, y2))
+                self.separators.append((tuple(sep[0]), tuple(sep[1])))
 
         logger.info(f"Loaded {len(self.rectangles)} rectangles and {len(self.separators)} separators from {coords_path}")
         self.apply_all()
@@ -314,6 +365,11 @@ class InteractiveMasker:
             elif key == ord('v'):
                 # Toggle mode
                 self.mode = "separator" if self.mode == "mask" else "mask"
+                # Reset any in-progress drawing
+                self.separator_start = None
+                self.current_point = None
+                self.drawing = False
+                self.start_point = None
                 logger.info(f"Switched to {self.mode.upper()} mode")
 
         cv2.destroyAllWindows()

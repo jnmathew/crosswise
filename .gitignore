@@ -19,12 +19,26 @@ __pycache__/
 # Project data
 /data/logs/
 /data/temp/
-/data/output/
+/data/output/*
+!/data/output/*_puzzle.json
 /data/output_json/*.tmp
+
+# Experimental artifacts in examples
+src/examples/*_deskewed*
+src/examples/*_masked*
+src/examples/*_ocr_results.md
+src/examples/*_mask_coords.json
+src/examples/*_preview*
+src/examples/*_column_boundaries*
+src/examples/IMG_5527\ copy*
+src/examples/page_deskew.py
+src/examples/process_*.py
+src/examples/run_*.py
 
 # Development and analysis scripts
 analyze_*.py
 test_black_cells.py
+debug_grid_visual.py
 
 # Session-specific documentation
 docs/*_NOTES.md
