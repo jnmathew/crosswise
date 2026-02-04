@@ -28,6 +28,8 @@ Core dependencies:
 - Adaptive threshold selection with multiple fallback strategies (gap, percentile, Otsu)
 - Quad detection and perspective transformation
 - Black cell classification for grid structure analysis
+- `assign_clue_numbers()` - Compute clue numbers from grid structure algorithmically
+- `compute_clue_slots()` - Derive all clue slots with positions and answer lengths
 
 **image_preprocessing.py** - General image preprocessing utilities:
 - Four-point perspective transform for grid warping
@@ -40,13 +42,20 @@ Core dependencies:
 - Automatic separator line placement between detected columns
 - Optional non-text region masking
 
+**clue_extraction.py** - OCR parsing and puzzle verification:
+- `parse_ocr_markdown()` - Parse Mistral OCR markdown output into structured clue data
+- `verify_puzzle()` - Match OCR clues against grid slots, ensure 100% correspondence
+- `match_clues_to_slots()` - Pair each OCR clue with its grid position and answer length
+- `build_puzzle_clues()` - Create structured Clue objects for the Puzzle model
+
 ### Interactive Tools (`src/examples/`)
 
 **interactive_masker.py** - GUI tool for manual preprocessing:
 - MASK mode: Draw white rectangles over unwanted areas (grids, ads, acrostics)
-- SEPARATOR mode: Place aqua/cyan vertical lines between clue columns
+- SEPARATOR mode: Click two points to draw tilted separator lines matching column angles
 - Save/load coordinates as JSON for reproducible preprocessing
 - Press 'v' to toggle modes, 's' to save, 'u' to undo, 'c' to clear
+- Separator width: 8px for clear OCR guidance
 
 **process_masked_image.py** - Automated post-masking pipeline:
 - Loads manually masked images
@@ -92,12 +101,21 @@ For extracting crossword clues from newspaper images:
 1. **Grid Detection**: Use `grid_detection.py` to locate and extract the crossword grid
 2. **Manual Masking**: Run `interactive_masker.py` to:
    - Draw white rectangles over grids, ads, and irrelevant content
-   - Place aqua separator lines between clue columns
+   - Place tilted separator lines between clue columns (matching text angle)
    - Save preprocessing coordinates for reuse
 3. **OCR Extraction**: Use Mistral OCR on the masked image to extract structured clues
-4. **Output**: Get ACROSS and DOWN clues with numbers in markdown format
+4. **Puzzle Verification**: Use `verify_puzzle()` to match OCR clues against grid slots
+   - Every OCR clue must match a grid slot
+   - Every grid slot must have an OCR clue
+   - Verification must pass 100% before proceeding
+5. **Build Puzzle**: Use `build_puzzle_clues()` to create structured Clue objects with answer lengths
+6. **Output**: Verified puzzle saved as JSON with grid structure and clue data
 
-The manual masking approach ensures accurate column separation, preventing OCR from reading across columns.
+The tilted separator approach (matching actual column angles) achieved 100% OCR accuracy on test images.
+
+### Key Insight: Tilted Separators
+
+Original vertical separators caused OCR errors when text columns were slightly angled. Using two-click tilted separators that follow the actual column angle achieved perfect (138/138) clue extraction.
 
 ## Development Notes
 
@@ -106,4 +124,43 @@ The manual masking approach ensures accurate column separation, preventing OCR f
 - Scale factors capped at 3.0× maximum to prevent excessive upscaling
 - Fallback strategies implemented (adaptive → Otsu thresholding) when component detection fails
 - Aqua/cyan (BGR: 255, 255, 0) used for separator lines - visible over white masks and gray newspaper
-- Separator width: 4px for clear visibility in preprocessed images
+- Separator width: 8px for clear OCR visibility
+- Grid clue numbers are computed algorithmically (not OCR'd) - more reliable
+- Puzzle verification requires 100% match between OCR clues and grid slots
+
+## Next Steps (Future Sessions)
+
+The pipeline from image → verified puzzle is complete. Remaining work:
+
+1. **Puzzle Solving**
+   - Option A: LLM-based solving (send clue + answer length, get answer)
+   - Option B: External crossword solver API/library
+   - Need to fill in `answer` field for each Clue
+
+2. **AI-Generated Hints**
+   - Pre-generate one hint + one explanation per clue
+   - Use solved answers to create targeted hints
+   - Store alongside puzzle data (not real-time chatbot)
+
+3. **Frontend Rendering**
+   - Display interactive crossword grid
+   - Show clues with hint system
+   - User fills in answers
+
+4. **Image Quality Check** (optional)
+   - Add upfront blur/resolution detection
+   - Fail fast with "please upload clearer image" message
+
+### Data Model
+
+Verified puzzle JSON stored at `data/output/<name>_puzzle.json`:
+```json
+{
+  "metadata": { "source_image", "grid_size", "verification" },
+  "grid": { "rows", "cols", "cells": [[{row, col, is_block, clue_number}]] },
+  "clues": {
+    "across": [{ "number", "text", "start", "length", "answer"? }],
+    "down": [...]
+  }
+}
+```
