@@ -354,6 +354,11 @@ def match_clues_to_slots(
     # Track which slots were matched
     matched_keys = set()
 
+    # Build reverse lookup: number -> list of available directions in grid
+    number_to_dirs = {}
+    for slot in grid_slots:
+        number_to_dirs.setdefault(slot["number"], []).append(slot["direction"])
+
     # Match each OCR clue to a grid slot
     for clue in ocr_clues:
         key = (clue["number"], clue["direction"])
@@ -362,7 +367,6 @@ def match_clues_to_slots(
             slot = slot_lookup[key]
             matched_keys.add(key)
 
-            # Merge clue text with grid slot info
             matched.append({
                 "number": clue["number"],
                 "direction": clue["direction"],
@@ -371,11 +375,29 @@ def match_clues_to_slots(
                 "length": slot["length"]
             })
         else:
-            # Critical error: OCR found a clue that doesn't exist in grid
-            errors.append(
-                f"OCR clue {clue['number']}-{clue['direction'].upper()} "
-                f"has no matching grid slot"
-            )
+            # Direction-swap fallback: trust grid for direction assignment.
+            # If OCR says "2-ACROSS" but grid only has "2-DOWN", remap it.
+            flip = "down" if clue["direction"] == "across" else "across"
+            flip_key = (clue["number"], flip)
+            if flip_key in slot_lookup and flip_key not in matched_keys:
+                slot = slot_lookup[flip_key]
+                matched_keys.add(flip_key)
+                warnings.append(
+                    f"OCR clue {clue['number']}-{clue['direction'].upper()} "
+                    f"remapped to {flip.upper()} (grid has no {clue['direction'].upper()} slot)"
+                )
+                matched.append({
+                    "number": clue["number"],
+                    "direction": flip,
+                    "text": clue["text"],
+                    "start": slot["start"],
+                    "length": slot["length"]
+                })
+            else:
+                errors.append(
+                    f"OCR clue {clue['number']}-{clue['direction'].upper()} "
+                    f"has no matching grid slot"
+                )
 
     # Check for unmatched grid slots (also errors - every slot needs a clue)
     for slot in grid_slots:
