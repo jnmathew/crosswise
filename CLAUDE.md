@@ -6,13 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Crosswise is an OCR pipeline project focused on extracting text from crossword puzzles and similar printed materials. The project uses Tesseract OCR with OpenCV preprocessing to handle challenging scanned images with small text and varying quality.
 
+## Environment
+
+**Virtual Environment**: Always use the project venv:
+```bash
+.venv/bin/python3 -m src.solver.solve_puzzle ...
+```
+
 ## Dependencies
 
 **Tesseract Binary Required**: Install separately via `brew install tesseract` (macOS) before installing Python dependencies.
 
 Install Python dependencies:
 ```bash
-pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
 Core dependencies:
@@ -128,14 +135,49 @@ Original vertical separators caused OCR errors when text columns were slightly a
 - Grid clue numbers are computed algorithmically (not OCR'd) - more reliable
 - Puzzle verification requires 100% match between OCR clues and grid slots
 
+### Crossword Solver (`src/solver/`)
+
+**solve_puzzle.py** - Main solver script:
+```bash
+# With TSV database (recommended)
+.venv/bin/python3 -m src.solver.solve_puzzle data/output/puzzle.json --use-database
+
+# Database only (no LLM fallback)
+.venv/bin/python3 -m src.solver.solve_puzzle data/output/puzzle.json --database-only
+
+# LLM only (original behavior)
+.venv/bin/python3 -m src.solver.solve_puzzle data/output/puzzle.json
+```
+
+**clue_database.py** - SQLite-backed clue database:
+- Loads `data/xd 2/clues.tsv` (7.5M clue/answer pairs from historical crosswords)
+- Converts to SQLite on first use (`data/clues.db`)
+- Provides fast lookup by clue text, pattern matching, and answer length
+- Pattern matching uses GLOB (e.g., `C_T` matches `CAT`, `COT`, `CUT`)
+
+**candidate_generator.py** - Candidate generation:
+- `generate_candidates_with_database()` - Database lookup with LLM fallback
+- `regenerate_with_patterns()` - Pattern-based refinement from crossing letters
+- `generate_candidates()` - LLM-only generation (OpenAI)
+
+**csp.py** - Constraint satisfaction solver:
+- Greedy assignment with 50 random starting points
+- Forward checking to prune inconsistent candidates
+- Backtracking search for complete solution
+
+**Solving Strategy**:
+1. Database lookup finds ~55% of clues from historical data
+2. LLM fallback generates candidates for remaining clues
+3. CSP solver finds consistent assignment across grid
+4. Pattern refinement uses crossing letters to regenerate candidates
+
 ## Next Steps (Future Sessions)
 
-The pipeline from image → verified puzzle is complete. Remaining work:
-
-1. **Puzzle Solving**
-   - Option A: LLM-based solving (send clue + answer length, get answer)
-   - Option B: External crossword solver API/library
-   - Need to fill in `answer` field for each Clue
+1. **Improve Solver Coverage**
+   - Current: 45% (62/138 clues on test puzzle)
+   - Add fuzzy clue matching (partial text, synonyms)
+   - Increase candidate diversity for low-confidence clues
+   - Consider dictionary-based pattern matching as additional source
 
 2. **AI-Generated Hints**
    - Pre-generate one hint + one explanation per clue
