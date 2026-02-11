@@ -41,9 +41,16 @@ from src.solver.candidate_generator import (
     generate_candidates_batch,
     clues_from_puzzle,
     solve_with_llm_candidates,
+    generate_with_extended_thinking,
     ClueInput,
     CandidateResult,
+    ScoredCandidate,
+    to_plain_candidates,
+    to_score_map,
 )
+
+# Word index
+from src.solver.word_index import WordIndex
 
 __all__ = [
     # Models
@@ -68,4 +75,10 @@ __all__ = [
     "solve_with_llm_candidates",
     "ClueInput",
     "CandidateResult",
+    "ScoredCandidate",
+    "to_plain_candidates",
+    "to_score_map",
+    "generate_with_extended_thinking",
+    # Word index
+    "WordIndex",
 ]

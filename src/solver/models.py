@@ -3,10 +3,38 @@ Solver data models for crossword puzzle solving.
 """
 
 from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
-from pydantic import BaseModel, ConfigDict, Field
+
+# Try to import pydantic; provide lightweight fallbacks if unavailable
+try:
+    from pydantic import BaseModel, ConfigDict, Field
+except Exception:  # ImportError or runtime resolution issues
+    class _FieldSpec:
+        def __init__(self, default=None, *, default_factory=None, description: Optional[str] = None):
+            self.default = default
+            self.default_factory = default_factory
+            self.description = description
+
+    def Field(default=None, *, default_factory=None, description: Optional[str] = None):
+        return _FieldSpec(default, default_factory=default_factory, description=description)
+
+    class ConfigDict(dict):
+        pass
+
+    class BaseModel:
+        def __init__(self, **kwargs):
+            # Assign provided values
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+            # Apply defaults from Field specs when not provided
+            for name, value in self.__class__.__dict__.items():
+                if isinstance(value, _FieldSpec) and not hasattr(self, name):
+                    if value.default_factory is not None:
+                        setattr(self, name, value.default_factory())
+                    else:
+                        setattr(self, name, value.default)
 
 if TYPE_CHECKING:
-    from src.core.models import Puzzle, Direction
+    from src.core.models import Puzzle
 
 
 class SolverInput(BaseModel):
@@ -25,6 +53,14 @@ class SolverInput(BaseModel):
     def clue_length(self, clue_id: str) -> int:
         """Return the length of a clue's answer."""
         return len(self.clue_cells[clue_id])
+
+    def crossing_count(self, clue_id: str) -> int:
+        """Count how many other clues cross this one."""
+        count = 0
+        for cell in self.clue_cells.get(clue_id, []):
+            if len(self.cell_to_clues.get(cell, [])) > 1:
+                count += 1
+        return count
 
     @classmethod
     def from_puzzle(cls, puzzle: "Puzzle") -> "SolverInput":
@@ -126,4 +162,16 @@ class SolveResult(BaseModel):
     )
     domain_wipeouts: Optional[int] = Field(
         default=None, description="Domain wipeouts during forward checking"
+    )
+    arc_consistency_pruned: Optional[int] = Field(
+        default=None, description="Values pruned by AC-3 preprocessing"
+    )
+    backjumps: Optional[int] = Field(
+        default=None, description="Conflict-directed backjumps"
+    )
+    sniper_calls: Optional[int] = Field(
+        default=None, description="Sniper escalation API calls"
+    )
+    theme_detected: Optional[str] = Field(
+        default=None, description="Detected theme pattern, if any"
     )

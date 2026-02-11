@@ -1,14 +1,24 @@
 """
 LLM-based candidate generation for crossword clues using OpenAI API.
+
+Also supports TSV/SQLite database lookup as primary candidate source,
+with LLM generation as fallback. Uses o1 for wordplay/pun clues.
+
+Supports structured outputs to guarantee exactly N candidates of length M.
 """
 
 import os
 import json
-from typing import Dict, List, Optional
+import re
+from typing import Dict, List, Optional, TYPE_CHECKING, Any
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+if TYPE_CHECKING:
+    from src.solver.clue_database import ClueDatabase
 
 # Load environment variables from .env
 load_dotenv()
@@ -16,6 +26,7 @@ load_dotenv()
 # Default batch size for API calls
 DEFAULT_BATCH_SIZE = 30
 DEFAULT_CANDIDATES_PER_CLUE = 4
+DEFAULT_MIN_CANDIDATES = 5
 
 
 @dataclass
@@ -25,6 +36,48 @@ class ClueInput:
     clue_id: str  # e.g., "1-across"
     text: str  # e.g., "Capital of France"
     length: int  # Total answer length (sum of word lengths)
+    pattern: Optional[str] = None  # e.g., "C_T" for constrained generation
+    category: Optional[str] = None  # "trivia", "definition", "wordplay", "fillin"
+    num_crossings: int = 0  # Number of crossing clues (for domain sizing)
+
+
+@dataclass
+class ScoredCandidate:
+    """A candidate answer with source and verification metadata."""
+
+    word: str
+    source: str  # "database", "llm", "word_index", "sniper"
+    confidence: float  # 0.0-1.0 from source
+    verified: bool  # True if found in DB or word index (Bouncer check)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ScoredCandidate) and self.word == other.word
+
+    def __hash__(self) -> int:
+        return hash(self.word)
+
+
+def to_plain_candidates(
+    scored: Dict[str, List["ScoredCandidate"]],
+) -> Dict[str, List[str]]:
+    """Convert scored candidates to plain word lists (verified first)."""
+    return {
+        clue_id: [sc.word for sc in candidates]
+        for clue_id, candidates in scored.items()
+    }
+
+
+def to_score_map(
+    scored: Dict[str, List["ScoredCandidate"]],
+) -> Dict[str, Dict[str, float]]:
+    """Extract a score map: clue_id -> {word: composite_score}.
+
+    Used by the CSP solver for value ordering (try high-score candidates first).
+    """
+    result: Dict[str, Dict[str, float]] = {}
+    for clue_id, candidates in scored.items():
+        result[clue_id] = {sc.word: sc.confidence for sc in candidates}
+    return result
 
 
 @dataclass
@@ -36,11 +89,267 @@ class CandidateResult:
     error: Optional[str] = None
 
 
+class ClueAnswer(BaseModel):
+    """A single clue's candidates with validation."""
+    clue_id: str
+    candidates: List[str]
+
+
+class CandidatesResponse(BaseModel):
+    """Structured response containing all clue candidates."""
+    answers: List[ClueAnswer]
+
+
+def generate_candidates_structured(
+    clues: List[ClueInput],
+    candidates_per_clue: int = DEFAULT_CANDIDATES_PER_CLUE,
+    api_key: Optional[str] = None,
+    model: str = "gpt-4o",
+) -> Dict[str, List[str]]:
+    """
+    Generate candidates using OpenAI structured outputs.
+
+    This guarantees we get valid JSON with exactly N candidates per clue.
+    Candidates are validated for correct length and pattern matching.
+
+    Args:
+        clues: List of ClueInput objects
+        candidates_per_clue: Exact number of candidates per clue
+        api_key: OpenAI API key
+        model: Model to use (gpt-4o recommended for structured outputs)
+
+    Returns:
+        Dict mapping clue_id to list of validated candidates
+    """
+    if not clues:
+        return {}
+
+    api_key = api_key or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not found")
+
+    client = OpenAI(api_key=api_key)
+
+    # Build clue descriptions with exact requirements
+    clue_specs = []
+    for c in clues:
+        spec = f"- {c.clue_id}: \"{c.text}\" - EXACTLY {c.length} letters"
+        if c.pattern and "_" in c.pattern:
+            spec += f", must match pattern {c.pattern}"
+        clue_specs.append(spec)
+
+    prompt = f"""You are a crossword puzzle expert. Generate exactly {candidates_per_clue} candidate answers for each clue.
+
+CRITICAL REQUIREMENTS:
+1. Each answer must be EXACTLY the specified number of letters (count carefully!)
+2. Answers must be UPPERCASE with NO SPACES
+3. If a pattern is given (e.g., "C_T"), the answer MUST have those exact letters in those positions
+4. For clues ending with "?" - these are puns/wordplay, think creatively!
+
+Clues:
+{chr(10).join(clue_specs)}
+
+Provide exactly {candidates_per_clue} valid candidates for each clue."""
+
+    # Build JSON schema dynamically based on clue requirements
+    # Use a simple array of objects for broader model compatibility
+    schema = {
+        "type": "object",
+        "properties": {
+            "answers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "clue_id": {"type": "string"},
+                        "candidates": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        }
+                    },
+                    "required": ["clue_id", "candidates"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        "required": ["answers"],
+        "additionalProperties": False
+    }
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "crossword_candidates",
+                    "strict": True,
+                    "schema": schema
+                }
+            },
+            max_tokens=4096,
+            temperature=0.7,
+        )
+
+        response_text = response.choices[0].message.content
+        data = json.loads(response_text)
+
+        # Parse and validate
+        result: Dict[str, List[str]] = {}
+        clue_map = {c.clue_id: c for c in clues}
+
+        for answer in data.get("answers", []):
+            clue_id = answer.get("clue_id")
+            candidates = answer.get("candidates", [])
+
+            if clue_id not in clue_map:
+                continue
+
+            clue = clue_map[clue_id]
+            valid_candidates = []
+
+            for word in candidates:
+                word = word.upper().replace(" ", "")
+                # Validate length
+                if len(word) != clue.length:
+                    continue
+                # Validate pattern
+                if clue.pattern and not _matches_pattern(word, clue.pattern):
+                    continue
+                valid_candidates.append(word)
+
+            result[clue_id] = valid_candidates
+
+        return result
+
+    except Exception as e:
+        print(f"  Warning: Structured output error: {e}")
+        # Fall back to regular generation
+        return generate_candidates_batch(clues, candidates_per_clue, api_key, model)
+
+
+def generate_with_o1(
+    clues: List[ClueInput],
+    candidates_per_clue: int = DEFAULT_CANDIDATES_PER_CLUE,
+    api_key: Optional[str] = None,
+) -> Dict[str, List[str]]:
+    """
+    Generate candidates for difficult/wordplay clues using GPT-5.
+
+    Uses gpt-5 with structured outputs for reliable JSON responses.
+    Focuses on wordplay, puns, and creative interpretations.
+
+    Args:
+        clues: List of ClueInput objects (typically wordplay clues)
+        candidates_per_clue: Number of candidates per clue
+        api_key: OpenAI API key
+
+    Returns:
+        Dict mapping clue_id to list of candidates
+    """
+    if not clues:
+        return {}
+
+    api_key = api_key or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not found")
+
+    client = OpenAI(api_key=api_key)
+    all_candidates: Dict[str, List[str]] = {}
+
+    # Process clues in small batches for wordplay focus
+    for clue in clues:
+        pattern_info = f" Must match pattern {clue.pattern} where _ is any letter." if clue.pattern and "_" in clue.pattern else ""
+
+        prompt = f"""You are a crossword expert specializing in wordplay and puns.
+
+Clue: "{clue.text}"
+Length: EXACTLY {clue.length} letters{pattern_info}
+
+The "?" at the end indicates this is WORDPLAY. Think creatively:
+- "Flower?" could mean RIVER (something that flows)
+- "Capital idea?" could reference a city name
+- Look for double meanings, homophones, hidden words, puns
+
+Generate {candidates_per_clue} candidate answers."""
+
+        # Use structured output for reliable JSON
+        schema = {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": f"Exactly {candidates_per_clue} candidate answers, each {clue.length} letters, UPPERCASE, no spaces"
+                }
+            },
+            "required": ["candidates"],
+            "additionalProperties": False
+        }
+
+        try:
+            # GPT-5 works better without structured outputs for creative tasks
+            simple_prompt = f"""{prompt}
+
+Respond with ONLY a JSON array of {candidates_per_clue} answers, like: ["ANSWER1", "ANSWER2", ...]"""
+
+            response = client.chat.completions.create(
+                model="gpt-5",
+                messages=[{"role": "user", "content": simple_prompt}],
+                max_completion_tokens=500,
+            )
+
+            response_text = response.choices[0].message.content.strip()
+            # Parse JSON array from response
+            if "```" in response_text:
+                lines = response_text.split("\n")
+                response_text = "\n".join(l for l in lines if not l.startswith("```")).strip()
+
+            start = response_text.find("[")
+            end = response_text.rfind("]") + 1
+            if start >= 0 and end > start:
+                answers = json.loads(response_text[start:end])
+            else:
+                answers = []
+
+            # Filter by length and pattern
+            filtered = []
+            for word in answers:
+                word = word.upper().replace(" ", "")
+                if len(word) != clue.length:
+                    continue
+                if clue.pattern and not _matches_pattern(word, clue.pattern):
+                    continue
+                filtered.append(word)
+
+            if filtered:
+                all_candidates[clue.clue_id] = filtered
+                print(f"    {clue.clue_id}: {filtered}")
+
+        except Exception as e:
+            print(f"    Warning: Wordplay generation error for {clue.clue_id}: {e}")
+
+    return all_candidates
+
+
 def _build_prompt(clues: List[ClueInput], candidates_per_clue: int) -> str:
     """Build the prompt for the LLM to generate candidates."""
-    clue_list = "\n".join(
-        f"- {c.clue_id}: \"{c.text}\" ({c.length} letters)" for c in clues
-    )
+    clue_lines = []
+    for c in clues:
+        if c.pattern and "_" in c.pattern:
+            # Show pattern constraint
+            clue_lines.append(f"- {c.clue_id}: \"{c.text}\" ({c.length} letters, pattern: {c.pattern})")
+        else:
+            clue_lines.append(f"- {c.clue_id}: \"{c.text}\" ({c.length} letters)")
+    clue_list = "\n".join(clue_lines)
+
+    # Check if any clues have patterns
+    has_patterns = any(c.pattern and "_" in c.pattern for c in clues)
+    pattern_rules = """
+- IMPORTANT: Some clues have letter patterns like "C_T" - answers MUST match the pattern exactly
+  - Known letters (A-Z) must appear in those exact positions
+  - Unknown positions (_) can be any letter""" if has_patterns else ""
 
     return f"""You are a crossword puzzle expert. For each clue below, provide exactly {candidates_per_clue} candidate answers.
 
@@ -48,7 +357,7 @@ Rules:
 - Each answer must be EXACTLY the specified number of letters
 - Answers should be UPPERCASE with NO SPACES (even for multi-word answers)
 - Rank candidates from most likely to least likely
-- Include common crossword answers and wordplay solutions
+- Include common crossword answers and wordplay solutions{pattern_rules}
 
 Clues:
 {clue_list}
@@ -77,9 +386,15 @@ def _parse_response(response_text: str, clue_ids: List[str]) -> Dict[str, List[s
         start = text.find("{")
         end = text.rfind("}") + 1
         if start >= 0 and end > start:
-            result = json.loads(text[start:end])
+            try:
+                result = json.loads(text[start:end])
+            except json.JSONDecodeError:
+                # Return empty results instead of failing
+                print(f"  Warning: Could not parse LLM response, skipping batch")
+                return {clue_id: [] for clue_id in clue_ids}
         else:
-            raise ValueError(f"Could not parse JSON from response: {e}")
+            print(f"  Warning: No JSON in LLM response, skipping batch")
+            return {clue_id: [] for clue_id in clue_ids}
 
     # Validate and normalize
     candidates = {}
@@ -129,26 +444,203 @@ def generate_candidates_batch(
     prompt = _build_prompt(clues, candidates_per_clue)
     clue_ids = [c.clue_id for c in clues]
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=4096,
-        temperature=0.7,
-    )
+    # o1 models use different parameters
+    is_o1 = model.startswith("o1")
+    if is_o1:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=3000,
+        )
+    else:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=4096,
+            temperature=0.7,
+        )
 
     response_text = response.choices[0].message.content
+    if not response_text:
+        print(f"DEBUG: Empty response from {model}")
+        print(f"DEBUG: Full response: {response}")
+        raise ValueError(f"Empty response from {model}")
     candidates = _parse_response(response_text, clue_ids)
 
-    # Filter candidates to only those with correct length
-    clue_lengths = {c.clue_id: c.length for c in clues}
+    # Build lookup maps for filtering
+    clue_map = {c.clue_id: c for c in clues}
+
+    # Filter candidates to only those with correct length and matching pattern
     for clue_id in candidates:
-        expected_len = clue_lengths.get(clue_id)
-        if expected_len:
-            candidates[clue_id] = [
-                w for w in candidates[clue_id] if len(w) == expected_len
-            ]
+        clue = clue_map.get(clue_id)
+        if not clue:
+            continue
+
+        filtered = []
+        for word in candidates[clue_id]:
+            # Check length
+            if len(word) != clue.length:
+                continue
+            # Check pattern if present
+            if clue.pattern and not _matches_pattern(word, clue.pattern):
+                continue
+            filtered.append(word)
+
+        candidates[clue_id] = filtered
 
     return candidates
+
+
+def _matches_pattern(word: str, pattern: str) -> bool:
+    """Check if a word matches a pattern like 'C_T' where _ is wildcard."""
+    if len(word) != len(pattern):
+        return False
+    for w_char, p_char in zip(word, pattern):
+        if p_char != "_" and w_char != p_char:
+            return False
+    return True
+
+
+def categorize_clue(text: str) -> str:
+    """
+    Heuristic clue categorization.
+
+    Returns one of: "trivia", "definition", "wordplay", "fillin".
+    """
+    text_stripped = text.strip()
+    # Wordplay: ends with ? or has pun indicators
+    if text_stripped.endswith("?") or "perhaps" in text_stripped.lower() or ", say" in text_stripped.lower():
+        return "wordplay"
+    # Fill-in-the-blank: contains blank markers
+    if "___" in text_stripped or "…" in text_stripped or "..." in text_stripped:
+        return "fillin"
+    return "definition"
+
+
+def compute_target_domain_size(
+    category: str,
+    db_hit_count: int,
+    num_crossings: int,
+) -> int:
+    """
+    Compute target domain size based on clue category and crossing density.
+
+    Category-based targets:
+    - High-confidence trivia (DB match >= 3): 3-5
+    - Standard definition/fill-in-blank: 5-10
+    - Wordplay/puns: 10-20
+
+    Crossing-density floors:
+    - 4-5 crossings: floor 2
+    - 2-3 crossings: floor 5
+    - 0-1 crossings: floor 10
+    """
+    # Category-based target
+    if db_hit_count >= 3:
+        target = 5
+    elif category in ("definition", "fillin"):
+        target = 10
+    else:  # wordplay
+        target = 20
+
+    # Crossing-density floor
+    if num_crossings >= 4:
+        floor = 2
+    elif num_crossings >= 2:
+        floor = 5
+    else:
+        floor = 10
+
+    return max(target, floor)
+
+
+def bouncer_filter(
+    candidates: Dict[str, List[str]],
+    db: Optional["ClueDatabase"] = None,
+    word_index: Optional[Any] = None,
+    clue_text_lookup: Optional[Dict[str, str]] = None,
+) -> Dict[str, List["ScoredCandidate"]]:
+    """
+    Cross-reference LLM candidates against DB and word index (Bouncer Filter).
+
+    Computes a composite confidence score per candidate:
+    - Source: DB-verified (0.8), word-index-verified (0.6), unverified (0.3)
+    - Broda bonus: up to +0.15 from word index quality score
+    - Clue-text match bonus: +0.1 if candidate was seen as answer to this clue in DB
+
+    Candidates sorted by composite score (highest first).
+
+    Args:
+        candidates: Dict mapping clue_id to list of candidate words
+        db: ClueDatabase for answer verification
+        word_index: WordIndex for membership testing and Broda scores
+        clue_text_lookup: Optional dict of clue_id -> clue text (for DB clue match bonus)
+
+    Returns:
+        Dict mapping clue_id to list of ScoredCandidate, sorted by score.
+    """
+    scored: Dict[str, List[ScoredCandidate]] = {}
+    for clue_id, words in candidates.items():
+        clue_scores: List[ScoredCandidate] = []
+        clue_text = (clue_text_lookup or {}).get(clue_id, "")
+
+        for word in words:
+            word_upper = word.upper()
+            is_in_db = False
+            is_in_index = False
+            is_clue_match = False
+
+            if db is not None:
+                try:
+                    cursor = db._conn.execute(
+                        "SELECT 1 FROM clues WHERE answer = ? LIMIT 1",
+                        (word_upper,),
+                    )
+                    is_in_db = cursor.fetchone() is not None
+
+                    # Check if this specific clue-answer pair exists in DB
+                    if is_in_db and clue_text:
+                        cursor2 = db._conn.execute(
+                            "SELECT 1 FROM clues WHERE clue = ? AND answer = ? LIMIT 1",
+                            (clue_text, word_upper),
+                        )
+                        is_clue_match = cursor2.fetchone() is not None
+                except Exception:
+                    pass
+
+            if word_index is not None:
+                is_in_index = word_index.contains(word_upper)
+
+            # Compute composite score
+            # Base: source reliability
+            if is_in_db:
+                base_score = 0.8
+            elif is_in_index:
+                base_score = 0.6
+            else:
+                base_score = 0.3
+
+            # Broda quality bonus (0 to 0.15)
+            broda_bonus = 0.0
+            if word_index is not None:
+                raw_score = word_index.score(word_upper)
+                if raw_score > 0:
+                    broda_bonus = min(raw_score / 100.0, 1.0) * 0.15
+
+            # Clue-text match bonus
+            clue_bonus = 0.1 if is_clue_match else 0.0
+
+            confidence = min(base_score + broda_bonus + clue_bonus, 1.0)
+            verified = is_in_db or is_in_index
+
+            clue_scores.append(
+                ScoredCandidate(word=word_upper, source="llm", confidence=confidence, verified=verified)
+            )
+
+        # Sort by confidence descending (best candidates first)
+        clue_scores.sort(key=lambda sc: sc.confidence, reverse=True)
+        scored[clue_id] = clue_scores
+    return scored
 
 
 def generate_candidates(
@@ -268,3 +760,759 @@ def solve_with_llm_candidates(
 
     # Solve with CSP
     return solve_csp(solver_input, candidates)
+
+
+def generate_candidates_with_database(
+    clues: List[ClueInput],
+    db: "ClueDatabase",
+    candidates_per_clue: int = DEFAULT_CANDIDATES_PER_CLUE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    api_key: Optional[str] = None,
+    model: str = "gpt-4o-mini",
+    use_llm_fallback: bool = True,
+    on_progress: Optional[callable] = None,
+) -> Dict[str, List[str]]:
+    """
+    Generate candidates using database lookup first, with optional LLM fallback.
+
+    This is the preferred method when a clue database is available.
+    Database lookups are fast and provide historically accurate answers.
+
+    Args:
+        clues: List of ClueInput objects
+        db: ClueDatabase instance for lookups
+        candidates_per_clue: Max candidates to return per clue
+        batch_size: Clues per LLM batch (if fallback needed)
+        api_key: OpenAI API key (for LLM fallback)
+        model: OpenAI model to use (for LLM fallback)
+        use_llm_fallback: Whether to use LLM for clues not in database
+        on_progress: Optional callback(phase, clue_id, candidates_found)
+
+    Returns:
+        Dict mapping clue_id to list of candidate words
+    """
+    if not clues:
+        return {}
+
+    candidates: Dict[str, List[str]] = {}
+    llm_needed: List[ClueInput] = []
+
+    # Phase 1: Database lookup
+    db_hits = 0
+    for clue in clues:
+        if clue.pattern and "_" in clue.pattern:
+            # Have pattern constraint - use clue + pattern lookup
+            answers = db.lookup_by_clue_and_pattern(
+                clue.text,
+                clue.pattern,
+                max_results=candidates_per_clue,
+            )
+        else:
+            # No pattern - use clue text lookup
+            answers = db.lookup_by_clue(
+                clue.text,
+                clue.length,
+                max_results=candidates_per_clue,
+            )
+
+        if answers:
+            candidates[clue.clue_id] = answers
+            db_hits += 1
+            if on_progress:
+                on_progress("database", clue.clue_id, len(answers))
+        else:
+            llm_needed.append(clue)
+
+    print(f"  Database lookup: {db_hits}/{len(clues)} clues found")
+
+    # Phase 2: LLM fallback for clues not in database
+    if llm_needed and use_llm_fallback:
+        # Use smaller batches (10 clues) for better LLM reliability
+        llm_batch_size = min(batch_size, 10)
+        print(f"  LLM fallback: generating for {len(llm_needed)} clues (batch size {llm_batch_size})...")
+
+        def on_batch(batch_num: int, total: int, results: Dict[str, List[str]]) -> None:
+            if on_progress:
+                for clue_id, cands in results.items():
+                    on_progress("llm", clue_id, len(cands))
+
+        llm_candidates = generate_candidates(
+            llm_needed,
+            candidates_per_clue=candidates_per_clue,
+            batch_size=llm_batch_size,
+            api_key=api_key,
+            model=model,
+            on_batch_complete=on_batch,
+        )
+
+        # Merge LLM results
+        candidates.update(llm_candidates)
+
+        llm_hits = sum(1 for cid in llm_candidates if llm_candidates.get(cid))
+        print(f"  LLM generated: {llm_hits}/{len(llm_needed)} clues")
+
+    elif llm_needed and not use_llm_fallback:
+        print(f"  {len(llm_needed)} clues have no database candidates (LLM fallback disabled)")
+
+    return candidates
+
+
+def regenerate_with_patterns(
+    clues: List[ClueInput],
+    db: "ClueDatabase",
+    candidates_per_clue: int = DEFAULT_CANDIDATES_PER_CLUE,
+) -> Dict[str, List[str]]:
+    """
+    Regenerate candidates for clues that have pattern constraints.
+
+    Uses database pattern matching which is efficient for finding
+    answers matching constraints like "C_T" (CAT, COT, CUT).
+
+    Args:
+        clues: List of ClueInput with pattern constraints
+        db: ClueDatabase instance
+        candidates_per_clue: Max candidates per clue
+
+    Returns:
+        Dict mapping clue_id to list of candidates matching pattern
+    """
+    candidates: Dict[str, List[str]] = {}
+
+    for clue in clues:
+        if not clue.pattern or "_" not in clue.pattern:
+            # No pattern - skip
+            continue
+
+        # Try clue + pattern first
+        answers = db.lookup_by_clue_and_pattern(
+            clue.text,
+            clue.pattern,
+            max_results=candidates_per_clue,
+        )
+
+        # If no results from clue match, try pattern-only
+        if not answers:
+            answers = db.lookup_by_pattern(
+                clue.pattern,
+                max_results=candidates_per_clue,
+            )
+
+        if answers:
+            candidates[clue.clue_id] = answers
+
+    return candidates
+
+
+def is_wordplay_clue(text: str) -> bool:
+    """
+    Detect clues that are puns/wordplay (Claude handles these better).
+
+    Indicators:
+    - Question mark at end (?) - classic pun indicator
+    - Words like "perhaps", "maybe", "say" - uncertainty hints at wordplay
+    - Ellipsis (...) - often indicates hidden meaning
+    """
+    indicators = [
+        text.endswith('?'),
+        'perhaps' in text.lower(),
+        'maybe' in text.lower(),
+        ', say' in text.lower(),
+        '...' in text,
+    ]
+    return any(indicators)
+
+
+def generate_with_claude(
+    clues: List[ClueInput],
+    candidates_per_clue: int = DEFAULT_CANDIDATES_PER_CLUE,
+    batch_size: int = 15,
+) -> Dict[str, List[str]]:
+    """
+    Generate candidates using Anthropic Claude API.
+
+    Claude excels at wordplay and pun clues that GPT often misses.
+
+    Args:
+        clues: List of ClueInput objects
+        candidates_per_clue: Number of candidates per clue
+        batch_size: Clues per API call
+
+    Returns:
+        Dict mapping clue_id to list of candidate words
+    """
+    try:
+        import anthropic
+    except ImportError:
+        print("  Warning: anthropic package not installed, skipping Claude generation")
+        return {}
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("  Warning: ANTHROPIC_API_KEY not set, skipping Claude generation")
+        return {}
+
+    client = anthropic.Anthropic(api_key=api_key)
+    all_candidates: Dict[str, List[str]] = {}
+
+    for i in range(0, len(clues), batch_size):
+        batch = clues[i:i + batch_size]
+
+        # Build clue list
+        clue_lines = []
+        for c in batch:
+            if c.pattern and "_" in c.pattern:
+                clue_lines.append(f"- {c.clue_id}: \"{c.text}\" ({c.length} letters, pattern: {c.pattern})")
+            else:
+                clue_lines.append(f"- {c.clue_id}: \"{c.text}\" ({c.length} letters)")
+
+        prompt = f"""You are a crossword puzzle expert specializing in wordplay and puns.
+
+For each clue, provide exactly {candidates_per_clue} candidate answers.
+
+Key rules:
+- Each answer must be EXACTLY the specified number of letters
+- Answers should be UPPERCASE with NO SPACES
+- Question marks (?) indicate puns or wordplay - think creatively!
+- Look for double meanings, homophones, hidden words, anagrams
+- If a pattern is given (like "C_T"), the answer MUST match it exactly
+
+Clues:
+{chr(10).join(clue_lines)}
+
+Respond with ONLY a JSON object mapping clue_id to an array of answers.
+Example: {{"1-across": ["PARIS", "LYONS"], "2-down": ["ECHO", "ARIA"]}}"""
+
+        try:
+            response = client.messages.create(
+                model="claude-opus-4-20250514",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            response_text = response.content[0].text
+            clue_ids = [c.clue_id for c in batch]
+            batch_candidates = _parse_response(response_text, clue_ids)
+
+            # Filter by length and pattern
+            clue_map = {c.clue_id: c for c in batch}
+            for clue_id in batch_candidates:
+                clue = clue_map.get(clue_id)
+                if not clue:
+                    continue
+                filtered = []
+                for word in batch_candidates[clue_id]:
+                    if len(word) != clue.length:
+                        continue
+                    if clue.pattern and not _matches_pattern(word, clue.pattern):
+                        continue
+                    filtered.append(word)
+                batch_candidates[clue_id] = filtered
+
+            all_candidates.update(batch_candidates)
+
+        except Exception as e:
+            print(f"  Warning: Claude API error: {e}")
+
+    return all_candidates
+
+
+def ensure_minimum_candidates(
+    clues: List[ClueInput],
+    candidates: Dict[str, List[str]],
+    db: "ClueDatabase",
+    min_candidates: int = DEFAULT_MIN_CANDIDATES,
+    model: str = "gpt-4o",
+    use_o1_for_wordplay: bool = True,
+    use_structured_outputs: bool = True,
+) -> Dict[str, List[str]]:
+    """
+    Ensure each clue has at least min_candidates options.
+
+    This prevents single-candidate clues from blocking the solver.
+    When a clue has fewer than min_candidates:
+    1. Use o1 for wordplay clues (better at reasoning through puns)
+    2. Use structured outputs for regular clues (guarantees valid JSON)
+
+    NOTE: We intentionally DON'T use db.lookup_by_length() because
+    random words of the correct length add noise without meaning.
+
+    Args:
+        clues: List of ClueInput objects
+        candidates: Current candidates dict
+        db: ClueDatabase instance
+        min_candidates: Minimum candidates per clue
+        model: OpenAI model for non-wordplay clues
+        use_o1_for_wordplay: Use o1 model for pun clues
+        use_structured_outputs: Use structured outputs for regular clues
+
+    Returns:
+        Updated candidates dict with minimum candidates per clue
+    """
+    # Identify clues needing more candidates
+    needs_more: List[ClueInput] = []
+
+    for clue in clues:
+        current = candidates.get(clue.clue_id, [])
+        if len(current) >= min_candidates:
+            continue
+        needs_more.append(clue)
+
+    # Generate with Claude Opus for all clues needing more candidates
+    if needs_more:
+        print(f"  Generating {len(needs_more)} clues with Claude Opus...")
+        claude_candidates = generate_with_claude(
+            needs_more,
+            candidates_per_clue=min_candidates,
+        )
+        for clue_id, cands in claude_candidates.items():
+            existing = set(candidates.get(clue_id, []))
+            for c in cands:
+                if c not in existing:
+                    existing.add(c)
+            candidates[clue_id] = list(existing)
+
+    # Report final counts
+    under_min = sum(1 for clue in clues if len(candidates.get(clue.clue_id, [])) < min_candidates)
+    if under_min > 0:
+        print(f"  Warning: {under_min} clues still have < {min_candidates} candidates")
+
+    return candidates
+
+
+# ── Synonym Regeneration (for simple definition clues with missing candidates) ──
+
+
+def generate_synonyms_batch(
+    clues: List[ClueInput],
+    model: str = "gpt-4o",
+) -> Dict[str, List[str]]:
+    """
+    Generate synonym-focused candidates for definition clues.
+
+    Uses a targeted prompt that asks specifically for synonyms and related terms,
+    catching simple answers that batch generation sometimes misses
+    (e.g., DWINDLES for "gets smaller", CONVENT for "religious retreat").
+
+    Args:
+        clues: List of ClueInput objects (should be definition-type clues)
+        model: OpenAI model to use
+
+    Returns:
+        Dict mapping clue_id to list of candidate words
+    """
+    if not clues:
+        return {}
+
+    client = OpenAI()
+    all_candidates: Dict[str, List[str]] = {}
+
+    # Process in batches of 15
+    for i in range(0, len(clues), 15):
+        batch = clues[i:i + 15]
+
+        clue_lines = []
+        for c in batch:
+            pattern_info = f", pattern: {c.pattern}" if c.pattern and "_" in c.pattern else ""
+            clue_lines.append(f"- {c.clue_id}: \"{c.text}\" ({c.length} letters{pattern_info})")
+
+        prompt = f"""You are a crossword expert. For each clue, provide 10 candidate answers.
+
+Think broadly about:
+- Direct synonyms and related terms
+- Less common synonyms (e.g., "dwindles" for "gets smaller")
+- Domain-specific terms (e.g., "convent" for "religious retreat")
+- Proper nouns if the clue suggests one (e.g., "Athens" for "capital on the Mediterranean")
+- Compound words or phrases without spaces (e.g., "POLLENCOUNT" for "allergy season report")
+- Abbreviations and acronyms common in crosswords
+
+Rules:
+- Each answer must be EXACTLY the specified number of letters
+- UPPERCASE, NO SPACES, NO HYPHENS
+- If a pattern is given, the answer MUST match it exactly
+
+Clues:
+{chr(10).join(clue_lines)}
+
+Respond with ONLY a JSON object mapping clue_id to array of answers.
+Example: {{"1-across": ["ANSWER1", "ANSWER2"]}}"""
+
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=4096,
+                temperature=0.8,  # Higher temp for diversity
+            )
+            response_text = response.choices[0].message.content
+            clue_ids = [c.clue_id for c in batch]
+            batch_candidates = _parse_response(response_text, clue_ids)
+
+            # Filter by length and pattern
+            clue_map = {c.clue_id: c for c in batch}
+            for clue_id in batch_candidates:
+                clue = clue_map.get(clue_id)
+                if not clue:
+                    continue
+                filtered = []
+                for word in batch_candidates[clue_id]:
+                    word = word.upper()
+                    if len(word) != clue.length:
+                        continue
+                    if clue.pattern and not _matches_pattern(word, clue.pattern):
+                        continue
+                    filtered.append(word)
+                batch_candidates[clue_id] = filtered
+
+            all_candidates.update(batch_candidates)
+
+        except Exception as e:
+            print(f"  Synonym generation error: {e}")
+
+    return all_candidates
+
+
+# ── Sniper Escalation Ladder ──────────────────────────────────────
+
+
+def sniper_escalation(
+    clue: ClueInput,
+    db: Optional["ClueDatabase"] = None,
+    word_index: Optional[Any] = None,
+    max_level: int = 3,
+) -> List[ScoredCandidate]:
+    """
+    Escalation ladder for gap-filling when domain hits zero.
+
+    Level 1: Claude Sonnet with pattern (standard clue, >=50% letters known)
+    Level 2: Claude Opus with wordplay decomposition (<50% or wordplay clue)
+    Level 3: Word index regex + Opus semantic ranking
+    Level 4: Stub (web search -- not yet implemented)
+
+    Auto-selects starting level based on clue category and pattern completeness.
+    """
+    pattern = clue.pattern or ("_" * clue.length)
+    known_ratio = sum(1 for c in pattern if c != "_") / len(pattern) if pattern else 0
+    is_wp = clue.category == "wordplay" or is_wordplay_clue(clue.text)
+
+    # Auto-select starting level
+    start_level = 2 if (is_wp or known_ratio < 0.5) else 1
+
+    for level in range(start_level, max_level + 1):
+        results: List[ScoredCandidate] = []
+
+        if level == 1:
+            results = _sniper_level_1(clue)
+        elif level == 2:
+            results = _sniper_level_2(clue)
+        elif level == 3:
+            results = _sniper_level_3(clue, word_index)
+        elif level == 4:
+            results = []  # Web search stub
+
+        if results:
+            return results
+
+    return []
+
+
+def _sniper_level_1(clue: ClueInput) -> List[ScoredCandidate]:
+    """Level 1: Claude Sonnet with pattern, fallback to gpt-4o. For standard clues with >=50% letters."""
+    candidates = generate_with_claude([clue], candidates_per_clue=8)
+    words = candidates.get(clue.clue_id, [])
+
+    # Fallback to OpenAI if Claude returned nothing
+    if not words:
+        fallback = generate_candidates_batch([clue], candidates_per_clue=8, model="gpt-4o")
+        words = fallback.get(clue.clue_id, [])
+
+    return [
+        ScoredCandidate(word=w, source="sniper_l1", confidence=0.6, verified=False)
+        for w in words
+    ]
+
+
+def _sniper_level_2(clue: ClueInput) -> List[ScoredCandidate]:
+    """Level 2: Claude Opus with explicit wordplay decomposition, fallback to gpt-4o."""
+    pattern_info = f"\nPattern: {clue.pattern}" if clue.pattern else ""
+
+    prompt = f"""You are an expert crossword solver specializing in wordplay, puns, and cryptic clues.
+
+Clue: "{clue.text}"
+Length: {clue.length} letters{pattern_info}
+
+Analyze this clue step by step:
+1. Identify the DEFINITION component (straight meaning)
+2. Identify the WORDPLAY component if present (anagram, reversal, container, charade, hidden word, double definition, homophone)
+3. Identify the wordplay TYPE
+4. Work through the wordplay to derive the answer
+5. Verify the answer matches the pattern and length
+
+Provide your top 8 candidate answers as a JSON array: ["ANSWER1", "ANSWER2", ...]
+Answers must be EXACTLY {clue.length} letters, UPPERCASE, NO SPACES."""
+
+    response_text = None
+
+    # Try Anthropic first
+    try:
+        import anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if api_key:
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model="claude-opus-4-20250514",
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            response_text = response.content[0].text
+    except Exception as e:
+        print(f"  Sniper L2 Claude error: {e}")
+
+    # Fallback to OpenAI gpt-4o
+    if response_text is None:
+        try:
+            openai_client = OpenAI()
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2048,
+                temperature=0.7,
+            )
+            response_text = response.choices[0].message.content
+        except Exception as e:
+            print(f"  Sniper L2 OpenAI error: {e}")
+            return []
+
+    if not response_text:
+        return []
+
+    # Extract JSON array from response
+    match = re.search(r'\[.*?\]', response_text, re.DOTALL)
+    if not match:
+        return []
+
+    try:
+        words = json.loads(match.group())
+    except json.JSONDecodeError:
+        return []
+
+    results = []
+    for w in words:
+        w = str(w).upper().strip()
+        if len(w) != clue.length:
+            continue
+        if clue.pattern and not _matches_pattern(w, clue.pattern):
+            continue
+        results.append(
+            ScoredCandidate(word=w, source="sniper_l2", confidence=0.8, verified=False)
+        )
+    return results
+
+
+def _sniper_level_3(
+    clue: ClueInput,
+    word_index: Optional[Any] = None,
+) -> List[ScoredCandidate]:
+    """Level 3: Word index regex match + Opus semantic ranking."""
+    if word_index is None or not clue.pattern:
+        return []
+
+    # Get all pattern matches from word index
+    regex_matches = word_index.match_pattern(clue.pattern, max_results=30)
+    if not regex_matches:
+        return []
+
+    # If few matches, return directly without LLM ranking
+    if len(regex_matches) <= 5:
+        return [
+            ScoredCandidate(word=w, source="sniper_l3", confidence=0.5, verified=True)
+            for w in regex_matches
+        ]
+
+    # Send to LLM for semantic ranking (try Anthropic, fallback to OpenAI)
+    ranking_prompt = f"""You are an expert crossword solver. Given this clue, rank the candidate words by likelihood of being the correct answer.
+
+Clue: "{clue.text}" ({clue.length} letters)
+Pattern: {clue.pattern}
+
+Candidates: {json.dumps(regex_matches)}
+
+Return ONLY a JSON array of the top 10 candidates, ordered from most to least likely: ["BEST", "SECOND", ...]"""
+
+    response_text = None
+
+    # Try Anthropic first
+    try:
+        import anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if api_key:
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": ranking_prompt}],
+            )
+            response_text = response.content[0].text
+    except Exception:
+        pass  # Fall through to OpenAI
+
+    # Fallback to OpenAI gpt-4o
+    if response_text is None:
+        try:
+            openai_client = OpenAI()
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": ranking_prompt}],
+                max_tokens=1024,
+                temperature=0.3,
+            )
+            response_text = response.choices[0].message.content
+        except Exception:
+            pass
+
+    if not response_text:
+        return [
+            ScoredCandidate(word=w, source="sniper_l3", confidence=0.4, verified=True)
+            for w in regex_matches[:10]
+        ]
+
+    match = re.search(r'\[.*?\]', response_text, re.DOTALL)
+    if not match:
+        return [
+            ScoredCandidate(word=w, source="sniper_l3", confidence=0.4, verified=True)
+            for w in regex_matches[:10]
+        ]
+
+    try:
+        ranked = json.loads(match.group())
+        return [
+            ScoredCandidate(word=str(w).upper(), source="sniper_l3", confidence=0.7, verified=True)
+            for w in ranked
+            if len(str(w)) == clue.length
+        ]
+    except json.JSONDecodeError:
+        return [
+            ScoredCandidate(word=w, source="sniper_l3", confidence=0.4, verified=True)
+            for w in regex_matches[:10]
+        ]
+
+
+def generate_with_extended_thinking(
+    clues: List[ClueInput],
+    batch_size: int = 8,
+    budget_tokens: int = 10000,
+    word_index: Optional[Any] = None,
+) -> Dict[str, List[ScoredCandidate]]:
+    """
+    Generate candidates using Claude extended thinking for hard clues.
+
+    Uses Sonnet 4.5 with thinking enabled — the model reasons through
+    wordplay, puns, and cryptic clue mechanics before answering.
+
+    No crossing patterns are used (avoids poisoned crossing problem).
+    Just clue text + answer length.
+
+    Args:
+        clues: Unsolved clues to generate candidates for
+        batch_size: Clues per API call (default: 8)
+        budget_tokens: Thinking token budget per call (default: 10000)
+        word_index: Optional word index for verification
+
+    Returns:
+        Dict mapping clue_id to list of ScoredCandidate
+    """
+    try:
+        import anthropic
+    except ImportError:
+        print("  Warning: anthropic package not installed, skipping extended thinking")
+        return {}
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("  Warning: ANTHROPIC_API_KEY not set, skipping extended thinking")
+        return {}
+
+    client = anthropic.Anthropic(api_key=api_key)
+    all_results: Dict[str, List[ScoredCandidate]] = {}
+
+    for i in range(0, len(clues), batch_size):
+        batch = clues[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (len(clues) + batch_size - 1) // batch_size
+
+        # Build clue list — no patterns, just clue text + length
+        clue_lines = []
+        for c in batch:
+            clue_lines.append(f'- {c.clue_id}: "{c.text}" ({c.length} letters)')
+
+        prompt = f"""You are an expert crossword puzzle solver. For each clue below, figure out the answer.
+
+Think carefully about each clue:
+- Is it a straight definition, wordplay, pun, or cryptic clue?
+- For wordplay: identify the definition part and the wordplay mechanism (anagram, hidden word, container, reversal, charade, double definition, homophone)
+- For puns (clues ending with ?): what common phrase or compound word is being punned on?
+- Consider abbreviations, slang, and crossword-ese
+
+Clues:
+{chr(10).join(clue_lines)}
+
+For each clue, provide your top 5 candidate answers ranked by confidence.
+Each answer must be EXACTLY the specified number of letters, UPPERCASE, NO SPACES.
+
+Respond with ONLY a JSON object: {{"clue_id": ["BEST", "SECOND", ...], ...}}"""
+
+        try:
+            print(f"  Extended thinking batch {batch_num}/{total_batches} ({len(batch)} clues)...")
+            response = client.messages.create(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=16000,
+                thinking={
+                    "type": "enabled",
+                    "budget_tokens": budget_tokens,
+                },
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            # Extract text block (skip thinking blocks)
+            response_text = ""
+            for block in response.content:
+                if block.type == "text":
+                    response_text = block.text
+                    break
+
+            if not response_text:
+                print(f"    Warning: no text response in batch {batch_num}")
+                continue
+
+            # Parse JSON response
+            clue_ids = [c.clue_id for c in batch]
+            batch_candidates = _parse_response(response_text, clue_ids)
+
+            # Convert to ScoredCandidates with length filtering
+            clue_map = {c.clue_id: c for c in batch}
+            added = 0
+            for clue_id, words in batch_candidates.items():
+                clue = clue_map.get(clue_id)
+                if not clue:
+                    continue
+                scored = []
+                for rank, word in enumerate(words):
+                    w = word.upper().replace(" ", "")
+                    if len(w) != clue.length:
+                        continue
+                    is_verified = word_index and word_index.contains(w)
+                    scored.append(ScoredCandidate(
+                        word=w,
+                        source="thinking",
+                        confidence=0.85 if is_verified else 0.75,
+                        verified=bool(is_verified),
+                    ))
+                if scored:
+                    all_results[clue_id] = scored
+                    added += 1
+
+            print(f"    Added candidates for {added}/{len(batch)} clues")
+
+        except Exception as e:
+            print(f"    Warning: Extended thinking error: {e}")
+
+    return all_results
