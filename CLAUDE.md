@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Crosswise is an OCR pipeline project focused on extracting text from crossword puzzles and similar printed materials. The project uses Tesseract OCR with OpenCV preprocessing to handle challenging scanned images with small text and varying quality.
+Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automatically extract the grid and clues via OCR, solve with AI, and play interactively with hints. The pipeline uses OpenCV for grid detection, Mistral OCR for clue extraction, Claude Opus for solving, and a React frontend for the interactive player.
 
 ## Environment
 
@@ -155,54 +155,96 @@ Original vertical separators caused OCR errors when text columns were slightly a
 - Provides fast lookup by clue text, pattern matching, and answer length
 - Pattern matching uses GLOB (e.g., `C_T` matches `CAT`, `COT`, `CUT`)
 
+**word_index.py** - Unified crossword word index:
+- Loads multiple word lists (Broda, Crossword Nexus, Spread the Wordlist)
+- Fast `contains()` membership testing and `match_pattern()` for pattern matching
+- Quality scores for value ordering in the solver
+
 **candidate_generator.py** - Candidate generation:
-- `generate_candidates_with_database()` - Database lookup with LLM fallback
+- `generate_candidates_with_database()` - Database lookup with Claude Opus fallback
+- `generate_with_claude()` - Claude Opus candidate generation (replaced OpenAI)
 - `regenerate_with_patterns()` - Pattern-based refinement from crossing letters
-- `generate_candidates()` - LLM-only generation (OpenAI)
+- `bouncer_filter()` - Score candidates by DB/word-index verification (0.3–1.0)
+- `ensure_minimum_candidates()` - Guarantee >= 5 candidates per clue
 
 **csp.py** - Constraint satisfaction solver:
-- Greedy assignment with 50 random starting points
-- Forward checking to prune inconsistent candidates
-- Backtracking search for complete solution
+- MAC (Maintaining Arc Consistency) with `mac_mode="search-only"` (skip AC-3 preprocessing)
+- MRV heuristic for variable selection, score-based value ordering
+- Conflict-Directed Backjumping (CDBJ)
+- 50 random starting points, best-of-N runs to combat nondeterminism
 
-**Solving Strategy**:
-1. Database lookup finds ~55% of clues from historical data
-2. LLM fallback generates candidates for remaining clues
-3. CSP solver finds consistent assignment across grid
-4. Pattern refinement uses crossing letters to regenerate candidates
+**generate_hints.py** - AI hint generation:
+- Batch hint + explanation generation using Claude
+- One hint and one explanation per solved clue
 
-## Next Steps (Future Sessions)
+**Solving Strategy** (achieves 100% on test puzzle):
+1. Database lookup finds ~70% of clues from 7.5M historical pairs
+2. Claude Opus fallback generates candidates for remaining clues
+3. Bouncer filter scores all candidates by DB/word-index verification
+4. Best-of-3 CSP solve with score-based value ordering
+5. Multi-pass pattern refinement: extract crossing letters → regenerate via DB + Claude → re-solve
+6. Hint generation runs in parallel after solve
 
-1. **Improve Solver Coverage**
-   - Current: 45% (62/138 clues on test puzzle)
-   - Add fuzzy clue matching (partial text, synonyms)
-   - Increase candidate diversity for low-confidence clues
-   - Consider dictionary-based pattern matching as additional source
+### FastAPI Backend (`src/api/`)
 
-2. **AI-Generated Hints**
-   - Pre-generate one hint + one explanation per clue
-   - Use solved answers to create targeted hints
-   - Store alongside puzzle data (not real-time chatbot)
+**server.py** - API endpoints:
+- `POST /api/upload` — Photo upload, grid detection, perspective warp
+- `POST /api/{id}/grid-edit` — User grid corrections (toggle black cells)
+- `POST /api/{id}/mask` — Apply masks/separators, Mistral OCR, verification
+- `POST /api/{id}/solve` — Trigger background solve with SSE progress
+- `GET /api/{id}/progress` — SSE stream for solve/hint progress
+- `GET /api/puzzles` — List available puzzles
+- `PATCH /api/puzzles/{id}` — Update puzzle metadata (e.g. name)
 
-3. **Frontend Rendering**
-   - Display interactive crossword grid
-   - Show clues with hint system
-   - User fills in answers
+**pipeline.py** - Orchestration wrapping core functions:
+- `run_grid_detection()` — Preprocess + detect grid
+- `run_ocr_and_verify()` — Mask application + Mistral OCR + verification
+- `run_solve_background()` — Background solve with progress callbacks
+- `_run_solve()` — Multi-pass CSP solver with Claude candidate generation
 
-4. **Image Quality Check** (optional)
-   - Add upfront blur/resolution detection
-   - Fail fast with "please upload clearer image" message
+**session_manager.py** — Session directory management under `data/sessions/{id}/`
+
+**models.py** — Pydantic schemas for API requests/responses
+
+### React Frontend (`web/`)
+
+**Components:**
+- `CrosswordPlayer.tsx` — Main player with react-crossword, auto-scroll via CrosswordContext, editable name, togglable correct counter, photo reference modal (original + masked tabs), Check Word, background solve banner with SSE
+- `HintPanel.tsx` — Progressive hint reveal (hint → explanation → answer), Check Word button
+- `PuzzleSelector.tsx` — Dynamic puzzle list from `/api/puzzles`
+- `UploadPage.tsx` — Multi-step wizard (upload → preview → grid edit → mask → solve)
+- `ImageMasker.tsx` — Canvas mask/separator tool with help overlay and example image
+- `GridEditor.tsx` — Toggle black cells to fix grid detection errors
+- `GridPreview.tsx` — Confirm detected grid before proceeding
+
+**Hooks:** `usePuzzle`, `useHints`, `useSSE`, `useUploadPipeline`
+
+**Running the app:**
+```bash
+# Terminal 1: Backend
+.venv/bin/python3 -m src.api.server
+
+# Terminal 2: Frontend
+cd web && npm run dev
+# Open http://localhost:5173
+```
 
 ### Data Model
 
-Verified puzzle JSON stored at `data/output/<name>_puzzle.json`:
+Puzzle JSON stored at `web/public/puzzles/{id}.json`:
 ```json
 {
-  "metadata": { "source_image", "grid_size", "verification" },
+  "metadata": { "source_image", "grid_size", "verification", "name?" },
   "grid": { "rows", "cols", "cells": [[{row, col, is_block, clue_number}]] },
   "clues": {
-    "across": [{ "number", "text", "start", "length", "answer"? }],
+    "across": [{ "number", "text", "start", "length", "answer?", "hint?", "explanation?" }],
     "down": [...]
   }
 }
 ```
+
+### Environment Variables
+
+- `ANTHROPIC_API_KEY` — Required for Claude Opus candidate generation and hints
+- `MISTRAL_API_KEY` — Required for Mistral OCR clue extraction
+- `OPENAI_API_KEY` — Optional, used by legacy candidate generation functions
