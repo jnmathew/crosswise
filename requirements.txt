@@ -1,6 +1,4 @@
-# System: install Tesseract binary separately (macOS): brew install tesseract
-# Core OCR & CV
-pytesseract>=0.3.10
+# Core CV
 opencv-python>=4.8.1
 numpy>=1.24.0
 
