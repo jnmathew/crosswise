@@ -1,94 +1,63 @@
-# Crosswise — Crossword OCR & Reasoning
+# Crosswise
 
-A pipeline that turns a photo of a printed crossword into a structured, playable digital puzzle and (eventually) provides AI hints and explanations.
+Upload a newspaper crossword photo, extract the grid and clues via OCR, solve with AI, and play interactively with progressive hints.
 
-- Primary docs: `vision.md`, `preprocess.md`
-- Code entry point: `src/main.py`
+## How it works
 
-## Quick start (macOS)
+1. **Upload** a photo of a printed crossword
+2. **Grid detection** — OpenCV finds the grid, corrects perspective, classifies black/white cells, and computes clue numbers algorithmically
+3. **Masking** — User draws masks over ads/irrelevant content and tilted separator lines between clue columns
+4. **OCR** — Mistral OCR extracts structured clues from the masked image
+5. **Verification** — Every OCR clue must match a grid slot and vice versa (100% correspondence required)
+6. **Solve** — Database lookup (7.5M historical clue/answer pairs) + Claude Opus fallback + constraint satisfaction solver
+7. **Play** — Interactive crossword player with progressive hints, explanations, and answer reveal
+
+## Quick start
 
 ```bash
-# 1) System dependency
-brew install tesseract
-
-# 2) Python env
+# Python backend
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt
 
-# 3) Environment (OpenAI, optional for Vision OCR)
+# Frontend
+cd web && npm install && cd ..
+
+# Environment
 cp .env.example .env
-# edit .env and set OPENAI_API_KEY (and OPENAI_MODEL if desired)
+# Set ANTHROPIC_API_KEY and MISTRAL_API_KEY
 
-# 4) Run (placeholder)
-python -m src.main --input data/examples/sample.jpg --out data/output_json/sample.json
+# Run (two terminals)
+.venv/bin/python3 -m src.api.server    # http://localhost:8000
+cd web && npm run dev                   # http://localhost:5173
 ```
 
 ## Project structure
 
 ```
-crosswise/
-│
-├── README.md
-├── PROJECT_CONTEXT_AI_AGENT.md
-├── CROSSWORD_INGEST_PIPELINE.md
-├── requirements.txt
-├── .gitignore
-│
-├── src/
-│   ├── __init__.py
-│   ├── main.py
-│   │
-│   ├── pipeline/
-│   │   ├── __init__.py
-│   │   ├── image_preprocessing.py
-│   │   ├── grid_detection.py
-│   │   ├── ocr_utils.py
-│   │   ├── clue_extraction.py
-│   │   ├── postprocess.py
-│   │   ├── puzzle_model.py
-│   │   ├── exporter.py
-│   │   └── validator.py
-│   │
-│   ├── ai/
-│   │   ├── __init__.py
-│   │   ├── reasoning.py
-│   │   ├── explanation.py
-│   │   ├── embeddings.py
-│   │   └── trainer.py
-│   │
-│   ├── utils/
-│   │   ├── __init__.py
-│   │   ├── file_io.py
-│   │   ├── config.py
-│   │   ├── logger.py
-│   │   └── viz.py
-│
-├── data/
-│   ├── examples/
-│   ├── output_json/
-│   ├── logs/
-│   ├── temp/
-│   └── dictionaries/
-│
-├── tests/
-│   ├── test_grid_detection.py
-│   ├── test_ocr_accuracy.py
-│   ├── test_clue_extraction.py
-│   └── test_schema_validation.py
-│
-└── docs/
-    ├── schema/
-    │   └── crossword_puzzle.schema.json
-    ├── design_diagrams/
-    │   ├── data_flow.png
-    │   └── pipeline_layers.png
-    └── LICENSES/
-        ├── OpenCV_LICENSE.txt
-        └── Tesseract_LICENSE.txt
+src/
+  core/               Grid detection, image preprocessing, clue extraction
+  api/                FastAPI server, SSE progress, session management
+  solver/             CSP solver, candidate generation, clue database, hints
+  tools/              Interactive masker, post-masking pipeline
+  examples/           Reference scripts (Mistral OCR demos, column detection)
+web/
+  src/components/     CrosswordPlayer, UploadPage, GridEditor, ImageMasker, HintPanel
+  src/hooks/          usePuzzle, useHints, useSSE, useUploadPipeline
+tests/
+docs/
 ```
 
-## Notes
-- Install Tesseract system binary via Homebrew.
-- Python deps include `opencv-python`, `pytesseract`, and `openai` (plus `python-dotenv` to load `.env`).
-- See `preprocess.md` for pipeline stages and `vision.md` for the high-level plan.
+## Tech stack
+
+**Backend:** FastAPI, OpenCV, Mistral OCR, Claude Opus, SQLite (clue database)
+**Frontend:** React, TypeScript, Vite, react-crossword, Server-Sent Events
+**Solver:** Database lookup (7.5M pairs) + LLM candidate generation + MAC arc consistency + conflict-directed backjumping, best-of-N with multi-pass pattern refinement
+
+## Solver approach
+
+1. **Database lookup** finds ~70% of answers from 7.5M historical crossword clue/answer pairs
+2. **Claude Opus** generates candidates for remaining clues
+3. **Bouncer filter** scores candidates by database/word-index verification
+4. **CSP solver** uses MAC with MRV heuristic and score-based value ordering
+5. **Multi-pass refinement** extracts crossing letters from partial solutions, regenerates candidates via database + Claude, and re-solves
+6. **Hint generation** produces one hint and one explanation per clue via Claude
