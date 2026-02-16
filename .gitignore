@@ -18,19 +18,13 @@ __pycache__/
 
 # Project data
 /data/
-the.md
 
-# Experimental artifacts in examples
-src/examples/*_deskewed*
-src/examples/*_masked*
-src/examples/*_ocr_results.md
-src/examples/*_mask_coords.json
-src/examples/*_preview*
-src/examples/*_column_boundaries*
-src/examples/IMG_5527\ copy*
-src/examples/page_deskew.py
-src/examples/process_*.py
-src/examples/run_*.py
+# Test images (too large for git)
+src/examples/*.JPG
+src/examples/*.jpg
+
+# Debug cell extractions
+src/core/cells/
 
 # Development and analysis scripts
 analyze_*.py
