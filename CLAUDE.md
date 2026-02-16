@@ -15,15 +15,12 @@ Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automa
 
 ## Dependencies
 
-**Tesseract Binary Required**: Install separately via `brew install tesseract` (macOS) before installing Python dependencies.
-
 Install Python dependencies:
 ```bash
 .venv/bin/pip install -r requirements.txt
 ```
 
 Core dependencies:
-- pytesseract (Tesseract wrapper)
 - opencv-python (image preprocessing)
 - numpy (array operations)
 
@@ -55,7 +52,7 @@ Core dependencies:
 - `match_clues_to_slots()` - Pair each OCR clue with its grid position and answer length
 - `build_puzzle_clues()` - Create structured Clue objects for the Puzzle model
 
-### Interactive Tools (`src/examples/`)
+### Interactive Tools (`src/tools/`)
 
 **interactive_masker.py** - GUI tool for manual preprocessing:
 - MASK mode: Draw white rectangles over unwanted areas (grids, ads, acrostics)
@@ -74,32 +71,11 @@ See `docs/COLUMN_DETECTION_WORKFLOW.md` for complete usage guide.
 
 ### OCR Integration
 
-**Tesseract OCR** (`src/pipeline/`) - Traditional OCR for grid digit extraction:
-- Used for extracting clue numbers from grid cells
-- Requires local Tesseract installation
-
-**Mistral OCR API** (`src/examples/mistralv2.py`) - Modern OCR for clue text extraction:
-- Better accuracy for multi-column newspaper layouts
+**Mistral OCR API** (`src/examples/mistralv2.py`) - OCR for clue text extraction:
+- Handles multi-column newspaper layouts
 - Structured output using Pydantic models
 - Handles complex layouts with separator guidance
 - Requires MISTRAL_API_KEY environment variable
-
-### OCR Pipeline (`src/pipeline/`)
-
-The pipeline consists of preprocessing utilities designed to improve OCR accuracy on challenging inputs:
-
-**ocr_presets.py** - Core OCR configuration and preprocessing:
-- `build_clues_config(dpi)` - Tesseract config for multi-word clue text (PSM 6)
-- `build_digits_config(dpi)` - Tesseract config for digit-only recognition (PSM 11, whitelist "0-9")
-- `ensure_readable_scale(image)` - Intelligent upscaling based on estimated x-height to ensure text is readable (minimum 14px median x-height)
-- `prepare_digits_image(image)` - Specialized preprocessing for small digits using top-hat morphology and adaptive thresholding
-
-**Key Preprocessing Strategies**:
-- Adaptive upscaling based on connected component analysis (not fixed scaling)
-- Denoising with fastNlMeansDenoising and bilateral filtering to handle halftone/newsprint artifacts
-- Morphological top-hat transform to enhance light text on darker backgrounds
-- Adaptive thresholding tuned for small text strokes
-- DPI defaults to 350 for Tesseract (adjustable per use case)
 
 ## Complete Workflow
 
@@ -177,7 +153,7 @@ Original vertical separators caused OCR errors when text columns were slightly a
 - Batch hint + explanation generation using Claude
 - One hint and one explanation per solved clue
 
-**Solving Strategy** (achieves 100% on test puzzle):
+**Solving Strategy**:
 1. Database lookup finds ~70% of clues from 7.5M historical pairs
 2. Claude Opus fallback generates candidates for remaining clues
 3. Bouncer filter scores all candidates by DB/word-index verification
