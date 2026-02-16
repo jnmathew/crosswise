@@ -70,7 +70,7 @@ Core dependencies:
 - Draws separator lines and saves preprocessed images
 - Optional Mistral OCR integration with `--run-ocr` flag
 
-See `src/examples/COLUMN_DETECTION_WORKFLOW.md` for complete usage guide.
+See `docs/COLUMN_DETECTION_WORKFLOW.md` for complete usage guide.
 
 ### OCR Integration
 

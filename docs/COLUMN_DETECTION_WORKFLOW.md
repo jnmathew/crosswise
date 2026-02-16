@@ -14,7 +14,7 @@ Run the interactive masking tool to hide unwanted content:
 
 ```bash
 source .venv/bin/activate
-python src/examples/interactive_masker.py "src/examples/IMG_5527 copy.JPG"
+python src/tools/interactive_masker.py "src/examples/IMG_5527 copy.JPG"
 ```
 
 ### Controls:
@@ -38,7 +38,7 @@ python src/examples/interactive_masker.py "src/examples/IMG_5527 copy.JPG"
 Run the automatic column detection and separator drawing:
 
 ```bash
-python src/examples/process_masked_image.py "src/examples/IMG_5527 copy_masked.JPG" --run-ocr
+python src/tools/process_masked_image.py "src/examples/IMG_5527 copy_masked.JPG" --run-ocr
 ```
 
 ### What it does:
@@ -90,12 +90,12 @@ The masking coordinates are saved to JSON, allowing you to:
 source .venv/bin/activate
 
 # Step 1: Mask unwanted areas
-python src/examples/interactive_masker.py "src/examples/IMG_5527 copy.JPG"
+python src/tools/interactive_masker.py "src/examples/IMG_5527 copy.JPG"
 # ... draw rectangles over grids and acrostic ...
 # ... press 's' to save ...
 
 # Step 2: Auto-process with column detection and OCR
-python src/examples/process_masked_image.py "src/examples/IMG_5527 copy_masked.JPG" --run-ocr
+python src/tools/process_masked_image.py "src/examples/IMG_5527 copy_masked.JPG" --run-ocr
 
 # Results are saved in the same directory
 ```
@@ -105,7 +105,7 @@ python src/examples/process_masked_image.py "src/examples/IMG_5527 copy_masked.J
 ### Too many/few columns detected
 Adjust the minimum column width:
 ```bash
-python src/examples/process_masked_image.py image.JPG --min-column-width 200
+python src/tools/process_masked_image.py image.JPG --min-column-width 200
 ```
 
 ### OCR reads across columns
@@ -116,5 +116,5 @@ python src/examples/process_masked_image.py image.JPG --min-column-width 200
 ### Need to edit masks
 Just re-run the masker on the original image - it will load the saved coordinates:
 ```bash
-python src/examples/interactive_masker.py "src/examples/IMG_5527 copy.JPG"
+python src/tools/interactive_masker.py "src/examples/IMG_5527 copy.JPG"
 ```
