@@ -20,9 +20,14 @@ Install Python dependencies:
 .venv/bin/pip install -r requirements.txt
 ```
 
-Core dependencies:
-- opencv-python (image preprocessing)
-- numpy (array operations)
+Key dependencies:
+- opencv-python, numpy (image processing, grid detection)
+- pydantic, pydantic-settings (data models, config)
+- fastapi, uvicorn (API server)
+- anthropic (Claude candidate generation + hints)
+- mistralai (OCR clue extraction)
+- openai (legacy/fallback candidate generation)
+- loguru (logging)
 
 ## Architecture
 
@@ -102,13 +107,11 @@ Original vertical separators caused OCR errors when text columns were slightly a
 
 ## Development Notes
 
-- Constants follow ALL_CAPS naming convention (e.g., `DEFAULT_DPI`, `TARGET_X_HEIGHT`)
 - Image processing uses grayscale conversion with careful handling of both color and grayscale inputs
-- Scale factors capped at 3.0× maximum to prevent excessive upscaling
 - Fallback strategies implemented (adaptive → Otsu thresholding) when component detection fails
-- Aqua/cyan (BGR: 255, 255, 0) used for separator lines - visible over white masks and gray newspaper
-- Separator width: 8px for clear OCR visibility
-- Grid clue numbers are computed algorithmically (not OCR'd) - more reliable
+- Aqua/cyan (BGR: 255, 255, 0) used for separator lines — visible over white masks and gray newspaper
+- Interactive masker draws separators at 8px width for clear OCR visibility
+- Grid clue numbers are computed algorithmically (not OCR'd) — more reliable
 - Puzzle verification requires 100% match between OCR clues and grid slots
 
 ### Crossword Solver (`src/solver/`)
@@ -138,10 +141,12 @@ Original vertical separators caused OCR errors when text columns were slightly a
 
 **candidate_generator.py** - Candidate generation:
 - `generate_candidates_with_database()` - Database lookup with Claude Opus fallback
-- `generate_with_claude()` - Claude Opus candidate generation (replaced OpenAI)
+- `generate_with_claude()` - Claude Opus candidate generation
 - `regenerate_with_patterns()` - Pattern-based refinement from crossing letters
 - `bouncer_filter()` - Score candidates by DB/word-index verification (0.3–1.0)
 - `ensure_minimum_candidates()` - Guarantee >= 5 candidates per clue
+- `sniper_escalation()` - Multi-level escalation ladder when domain hits zero (Sonnet → Opus → word index + ranking)
+- `generate_with_extended_thinking()` - Claude Sonnet 4.5 with thinking enabled for hard/wordplay clues
 
 **csp.py** - Constraint satisfaction solver:
 - MAC (Maintaining Arc Consistency) with `mac_mode="search-only"` (skip AC-3 preprocessing)
