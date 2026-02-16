@@ -2,7 +2,7 @@
 Solver data models for crossword puzzle solving.
 """
 
-from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
+from typing import Dict, List, Tuple, Optional
 
 # Try to import pydantic; provide lightweight fallbacks if unavailable
 try:
@@ -33,9 +33,6 @@ except Exception:  # ImportError or runtime resolution issues
                     else:
                         setattr(self, name, value.default)
 
-if TYPE_CHECKING:
-    from src.core.models import Puzzle
-
 
 class SolverInput(BaseModel):
     """Input structure for crossword solvers."""
@@ -61,86 +58,6 @@ class SolverInput(BaseModel):
             if len(self.cell_to_clues.get(cell, [])) > 1:
                 count += 1
         return count
-
-    @classmethod
-    def from_puzzle(cls, puzzle: "Puzzle") -> "SolverInput":
-        """
-        Build SolverInput from a Puzzle instance.
-
-        Scans the grid for clue starts and builds clue_cells and cell_to_clues mappings.
-
-        Args:
-            puzzle: Puzzle instance with grid and clues
-
-        Returns:
-            SolverInput ready for solving
-        """
-        from src.core.models import Direction
-
-        clue_cells: Dict[str, List[Tuple[int, int]]] = {}
-        cell_to_clues: Dict[Tuple[int, int], List[str]] = {}
-
-        rows = puzzle.rows
-        cols = puzzle.cols
-
-        # Build a map from clue_number -> (row, col) of the cell with that number
-        clue_number_to_cell: Dict[int, Tuple[int, int]] = {}
-        for r in range(rows):
-            for c in range(cols):
-                cell = puzzle.grid[r][c]
-                if cell.clue_number is not None:
-                    clue_number_to_cell[cell.clue_number] = (r, c)
-
-        # Process across clues
-        for clue in puzzle.clues.get(Direction.ACROSS, []):
-            clue_id = f"{clue.number}-across"
-            start_pos = clue_number_to_cell.get(clue.number)
-            if start_pos is None:
-                continue
-
-            r, c = start_pos
-            length = clue.total_length
-            cells = []
-            for i in range(length):
-                if c + i < cols:
-                    cell = puzzle.grid[r][c + i]
-                    if not cell.is_block:
-                        cells.append((r, c + i))
-                    else:
-                        break
-            clue_cells[clue_id] = cells
-
-        # Process down clues
-        for clue in puzzle.clues.get(Direction.DOWN, []):
-            clue_id = f"{clue.number}-down"
-            start_pos = clue_number_to_cell.get(clue.number)
-            if start_pos is None:
-                continue
-
-            r, c = start_pos
-            length = clue.total_length
-            cells = []
-            for i in range(length):
-                if r + i < rows:
-                    cell = puzzle.grid[r + i][c]
-                    if not cell.is_block:
-                        cells.append((r + i, c))
-                    else:
-                        break
-            clue_cells[clue_id] = cells
-
-        # Build cell_to_clues mapping
-        for clue_id, cells in clue_cells.items():
-            for cell in cells:
-                if cell not in cell_to_clues:
-                    cell_to_clues[cell] = []
-                cell_to_clues[cell].append(clue_id)
-
-        return cls(
-            clue_cells=clue_cells,
-            cell_to_clues=cell_to_clues,
-            grid_size=(rows, cols),
-        )
 
 
 class SolveResult(BaseModel):

@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 from loguru import logger
 
-from core.clue_column_detector import preprocess_clues_for_ocr, detect_column_boundaries
+from src.core.clue_column_detector import preprocess_clues_for_ocr, detect_column_boundaries
 
 
 def main():

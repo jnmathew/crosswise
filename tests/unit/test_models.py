@@ -1,6 +1,6 @@
 """Test data models."""
 import pytest
-from src.core.models import Cell, Clue, Puzzle, Direction, PuzzleMetadata
+from src.core.models import Cell, Clue, Direction
 
 
 class TestCell:
@@ -103,49 +103,3 @@ class TestClue:
                 text="Test",
                 answer_length=[],  # Empty
             )
-
-
-class TestPuzzle:
-    """Test Puzzle model."""
-
-    def test_puzzle_creation(self, sample_puzzle_data):
-        """Test puzzle creation from dict."""
-        puzzle = Puzzle.from_json(sample_puzzle_data)
-        assert puzzle.rows == 1
-        assert puzzle.cols == 5
-        assert len(puzzle.clues[Direction.ACROSS]) == 1
-
-    def test_puzzle_get_cell(self, sample_puzzle_data):
-        """Test get_cell method."""
-        puzzle = Puzzle.from_json(sample_puzzle_data)
-        cell = puzzle.get_cell(0, 0)
-        assert cell is not None
-        assert cell.row == 0
-        assert cell.col == 0
-        assert cell.clue_number == 1
-
-    def test_puzzle_get_cell_out_of_bounds(self, sample_puzzle_data):
-        """Test get_cell with invalid coordinates."""
-        puzzle = Puzzle.from_json(sample_puzzle_data)
-        cell = puzzle.get_cell(10, 10)
-        assert cell is None
-
-    def test_puzzle_to_json(self, sample_puzzle_data):
-        """Test JSON serialization."""
-        puzzle = Puzzle.from_json(sample_puzzle_data)
-        json_data = puzzle.to_json()
-        assert "grid" in json_data
-        assert "clues" in json_data
-        assert "metadata" in json_data
-
-    def test_puzzle_roundtrip(self, sample_puzzle_data):
-        """Test from_json -> to_json roundtrip."""
-        puzzle1 = Puzzle.from_json(sample_puzzle_data)
-        json_data = puzzle1.to_json()
-        puzzle2 = Puzzle.from_json(json_data)
-
-        assert puzzle1.rows == puzzle2.rows
-        assert puzzle1.cols == puzzle2.cols
-        assert len(puzzle1.clues[Direction.ACROSS]) == len(
-            puzzle2.clues[Direction.ACROSS]
-        )

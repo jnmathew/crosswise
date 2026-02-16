@@ -2,7 +2,7 @@
 Core data models for crossword puzzle representation.
 Uses Pydantic for validation and serialization.
 """
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 from pydantic import BaseModel, Field, field_validator
 from enum import Enum
 
@@ -119,30 +119,4 @@ class Puzzle(BaseModel):
         if 0 <= row < self.rows and 0 <= col < self.cols:
             return self.grid[row][col]
         return None
-
-    def to_json(self) -> Dict[str, Any]:
-        """
-        Export to JSON-serializable dict.
-
-        Returns:
-            Dictionary representation of puzzle
-        """
-        return self.model_dump(mode="json")
-
-    @classmethod
-    def from_json(cls, data: Dict[str, Any]) -> "Puzzle":
-        """
-        Load from JSON dict.
-
-        Args:
-            data: Dictionary with puzzle data
-
-        Returns:
-            Puzzle instance
-
-        Raises:
-            ValidationError: If data doesn't match schema
-        """
-        return cls.model_validate(data)
-
 

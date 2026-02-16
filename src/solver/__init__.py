@@ -39,8 +39,6 @@ from src.solver.puzzles import get_tiny_3x3, get_mini_5x5, get_t_intersection
 from src.solver.candidate_generator import (
     generate_candidates,
     generate_candidates_batch,
-    clues_from_puzzle,
-    solve_with_llm_candidates,
     generate_with_extended_thinking,
     ClueInput,
     CandidateResult,
@@ -71,8 +69,6 @@ __all__ = [
     # Candidate generation
     "generate_candidates",
     "generate_candidates_batch",
-    "clues_from_puzzle",
-    "solve_with_llm_candidates",
     "ClueInput",
     "CandidateResult",
     "ScoredCandidate",

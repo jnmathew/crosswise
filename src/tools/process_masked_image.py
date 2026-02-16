@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import cv2
 from loguru import logger
 
-from core.clue_column_detector import preprocess_clues_for_ocr, detect_column_boundaries
+from src.core.clue_column_detector import preprocess_clues_for_ocr, detect_column_boundaries
 
 
 def main():
