@@ -2,7 +2,7 @@
 Core data models for crossword puzzle representation.
 Uses Pydantic for validation and serialization.
 """
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field, field_validator
 from enum import Enum
 
@@ -146,25 +146,3 @@ class Puzzle(BaseModel):
         return cls.model_validate(data)
 
 
-class OCRResult(BaseModel):
-    """Result of OCR operation."""
-
-    text: str
-    confidence: float = Field(ge=0.0, le=1.0)
-    bounding_box: Optional[tuple[int, int, int, int]] = Field(
-        default=None, description="(x, y, w, h)"
-    )
-
-
-class ProcessingStage(str, Enum):
-    """Pipeline processing stages."""
-
-    LOAD = "load"
-    PREPROCESS = "preprocess"
-    GRID_DETECTION = "grid_detection"
-    CELL_EXTRACTION = "cell_extraction"
-    CLUE_DETECTION = "clue_detection"
-    CLUE_OCR = "clue_ocr"
-    POSTPROCESS = "postprocess"
-    VALIDATION = "validation"
-    COMPLETE = "complete"
