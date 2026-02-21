@@ -31,8 +31,8 @@ analyze_*.py
 test_black_cells.py
 debug_grid_visual.py
 
-# Session-specific documentation
-docs/*_NOTES.md
+# Internal dev notes (session notes, scratch docs)
+internal_dev/
 
 # VS Code
 .vscode/
