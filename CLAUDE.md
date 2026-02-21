@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automatically extract the grid and clues via OCR, solve with AI, and play interactively with hints. The pipeline uses OpenCV for grid detection, Mistral OCR for clue extraction, Claude Opus for solving, and a React frontend for the interactive player.
+Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automatically extract the grid and clues via OCR, solve with AI, and play interactively with hints. The pipeline uses OpenCV for grid detection, Gemini 3 Flash for clue extraction (with Mistral as fallback), Claude Opus for solving, and a React frontend for the interactive player.
 
 ## Environment
 
@@ -25,7 +25,8 @@ Key dependencies:
 - pydantic, pydantic-settings (data models, config)
 - fastapi, uvicorn (API server)
 - anthropic (Claude candidate generation + hints)
-- mistralai (OCR clue extraction)
+- google-genai (Gemini 3 Flash OCR — default provider)
+- mistralai (Mistral OCR — fallback provider)
 - openai (legacy/fallback candidate generation)
 - loguru (logging)
 
@@ -52,7 +53,7 @@ Key dependencies:
 - Optional non-text region masking
 
 **clue_extraction.py** - OCR parsing and puzzle verification:
-- `parse_ocr_markdown()` - Parse Mistral OCR markdown output into structured clue data
+- `parse_ocr_markdown()` - Parse OCR markdown output into structured clue data
 - `verify_puzzle()` - Match OCR clues against grid slots, ensure 100% correspondence
 - `match_clues_to_slots()` - Pair each OCR clue with its grid position and answer length
 - `build_puzzle_clues()` - Create structured Clue objects for the Puzzle model
@@ -70,40 +71,45 @@ Key dependencies:
 - Loads manually masked images
 - Applies automatic column detection if needed
 - Draws separator lines and saves preprocessed images
-- Optional Mistral OCR integration with `--run-ocr` flag
+- Optional OCR integration with `--run-ocr` flag (uses configured provider)
 
 See `docs/COLUMN_DETECTION_WORKFLOW.md` for complete usage guide.
 
-### OCR Integration
+### OCR Integration (`src/ocr/`)
 
-**Mistral OCR API** (`src/examples/mistralv2.py`) - OCR for clue text extraction:
-- Handles multi-column newspaper layouts
+Pluggable OCR provider system — switch with `OCR_PROVIDER=gemini|mistral` in `.env`.
+
+**base.py** — `OCRProvider` protocol and `create_ocr_provider()` factory.
+
+**gemini.py** — Gemini 3 Flash provider (default):
+- One-shots clue extraction from raw newspaper photos, no preprocessing needed
+- Handles multi-column Sunday-size layouts (142 clues) without masking or separators
+- Uses `google-genai` SDK with structured extraction prompt
+- Requires `GEMINI_API_KEY` environment variable
+
+**mistral.py** — Mistral OCR provider (fallback):
 - Structured output using Pydantic models
-- Handles complex layouts with separator guidance
-- Requires MISTRAL_API_KEY environment variable
+- Works best with preprocessed images (masking + separator lines)
+- Requires `MISTRAL_API_KEY` environment variable
 
 ## Complete Workflow
 
 For extracting crossword clues from newspaper images:
 
 1. **Grid Detection**: Use `grid_detection.py` to locate and extract the crossword grid
-2. **Manual Masking**: Run `interactive_masker.py` to:
-   - Draw white rectangles over grids, ads, and irrelevant content
-   - Place tilted separator lines between clue columns (matching text angle)
-   - Save preprocessing coordinates for reuse
-3. **OCR Extraction**: Use Mistral OCR on the masked image to extract structured clues
-4. **Puzzle Verification**: Use `verify_puzzle()` to match OCR clues against grid slots
+2. **OCR Extraction**: Gemini 3 Flash extracts clues directly from raw photos — no preprocessing needed
+3. **Puzzle Verification**: Use `verify_puzzle()` to match OCR clues against grid slots
    - Every OCR clue must match a grid slot
    - Every grid slot must have an OCR clue
    - Verification must pass 100% before proceeding
-5. **Build Puzzle**: Use `build_puzzle_clues()` to create structured Clue objects with answer lengths
-6. **Output**: Verified puzzle saved as JSON with grid structure and clue data
+4. **Build Puzzle**: Use `build_puzzle_clues()` to create structured Clue objects with answer lengths
+5. **Output**: Verified puzzle saved as JSON with grid structure and clue data
 
-The tilted separator approach (matching actual column angles) achieved 100% OCR accuracy on test images.
+### Fallback: Manual Masking (for Mistral provider)
 
-### Key Insight: Tilted Separators
-
-Original vertical separators caused OCR errors when text columns were slightly angled. Using two-click tilted separators that follow the actual column angle achieved perfect (138/138) clue extraction.
+If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mistral`) and use the preprocessing tools:
+- Run `interactive_masker.py` to draw white rectangles over grids/ads and tilted separator lines between columns
+- The tilted separator approach (matching actual column angles) achieved 100% Mistral OCR accuracy on test images
 
 ## Development Notes
 
@@ -171,7 +177,7 @@ Original vertical separators caused OCR errors when text columns were slightly a
 **server.py** - API endpoints:
 - `POST /api/upload` — Photo upload, grid detection, perspective warp
 - `POST /api/{id}/grid-edit` — User grid corrections (toggle black cells)
-- `POST /api/{id}/mask` — Apply masks/separators, Mistral OCR, verification
+- `POST /api/{id}/mask` — Apply masks/separators, OCR (via configured provider), verification
 - `POST /api/{id}/solve` — Trigger background solve with SSE progress
 - `GET /api/{id}/progress` — SSE stream for solve/hint progress
 - `GET /api/puzzles` — List available puzzles
@@ -179,7 +185,7 @@ Original vertical separators caused OCR errors when text columns were slightly a
 
 **pipeline.py** - Orchestration wrapping core functions:
 - `run_grid_detection()` — Preprocess + detect grid
-- `run_ocr_and_verify()` — Mask application + Mistral OCR + verification
+- `run_ocr_and_verify()` — Mask application + OCR (via configured provider) + verification
 - `run_solve_background()` — Background solve with progress callbacks
 - `_run_solve()` — Multi-pass CSP solver with Claude candidate generation
 
@@ -226,6 +232,8 @@ Puzzle JSON stored at `web/public/puzzles/{id}.json`:
 
 ### Environment Variables
 
+- `GEMINI_API_KEY` — Required for Gemini 3 Flash OCR (default provider)
 - `ANTHROPIC_API_KEY` — Required for Claude Opus candidate generation and hints
-- `MISTRAL_API_KEY` — Required for Mistral OCR clue extraction
+- `MISTRAL_API_KEY` — Required if using Mistral OCR provider
 - `OPENAI_API_KEY` — Optional, used by legacy candidate generation functions
+- `OCR_PROVIDER` — `"gemini"` (default) or `"mistral"`
