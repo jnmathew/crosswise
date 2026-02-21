@@ -135,50 +135,6 @@ def apply_masks(image: np.ndarray, mask: MaskRequest) -> np.ndarray:
     return img
 
 
-def run_mistral_ocr(image_path: Path) -> str:
-    """Run Mistral OCR on an image, return markdown-formatted clue text."""
-    from pydantic import BaseModel as PydanticBaseModel
-    from typing import List as TypingList
-    from mistralai import Mistral, ImageURLChunk
-    from mistralai.extra import response_format_from_pydantic_model
-
-    class Clue(PydanticBaseModel):
-        num: int
-        clue: str
-
-    class CrosswordClues(PydanticBaseModel):
-        ACROSS: TypingList[Clue]
-        DOWN: TypingList[Clue]
-
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    with Mistral(api_key=os.getenv("MISTRAL_API_KEY", "")) as mistral:
-        res = mistral.ocr.process(
-            model="mistral-ocr-latest",
-            document=ImageURLChunk(image_url=f"data:image/jpeg;base64,{img_b64}"),
-            document_annotation_format=response_format_from_pydantic_model(CrosswordClues),
-            include_image_base64=False,
-        )
-
-    # Convert to markdown format expected by parse_ocr_markdown
-    if not hasattr(res, "document_annotation") or not res.document_annotation:
-        raise ValueError("Mistral OCR returned no structured data")
-
-    clues = json.loads(res.document_annotation) if isinstance(res.document_annotation, str) else res.document_annotation
-
-    lines = ["## ACROSS\n"]
-    for clue in clues.get("ACROSS", []) if isinstance(clues, dict) else clues.ACROSS:
-        c = clue if isinstance(clue, dict) else {"num": clue.num, "clue": clue.clue}
-        lines.append(f"{c['num']}. {c['clue']}")
-    lines.append("\n## DOWN\n")
-    for clue in clues.get("DOWN", []) if isinstance(clues, dict) else clues.DOWN:
-        c = clue if isinstance(clue, dict) else {"num": clue.num, "clue": clue.clue}
-        lines.append(f"{c['num']}. {c['clue']}")
-
-    return "\n".join(lines)
-
-
 def run_ocr_and_verify(session_dir: Path, mask: MaskRequest, config: Settings) -> Dict[str, Any]:
     """Phase 2: Apply masks, run OCR, verify against grid."""
     from src.core.clue_extraction import parse_ocr_markdown, verify_puzzle
@@ -188,8 +144,11 @@ def run_ocr_and_verify(session_dir: Path, mask: MaskRequest, config: Settings) -
     masked = apply_masks(original, mask)
     cv2.imwrite(str(session_dir / "masked.jpg"), masked)
 
-    # Run Mistral OCR
-    ocr_markdown = run_mistral_ocr(session_dir / "masked.jpg")
+    # Run OCR
+    from src.ocr.base import create_ocr_provider
+
+    ocr_provider = create_ocr_provider(config)
+    ocr_markdown = ocr_provider.extract_clues(session_dir / "masked.jpg")
     with open(session_dir / "ocr_result.md", "w") as f:
         f.write(ocr_markdown)
 

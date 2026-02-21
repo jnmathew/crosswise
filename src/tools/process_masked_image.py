@@ -112,88 +112,23 @@ def main():
 
     # Run OCR if requested
     if args.run_ocr:
-        logger.info("\nRunning Mistral OCR...")
+        logger.info("\nRunning OCR...")
         try:
-            import os
-            import base64
-            from typing import List
-            from pydantic import BaseModel
-            from mistralai import Mistral, ImageURLChunk
-            from mistralai.extra import response_format_from_pydantic_model
-            from dotenv import load_dotenv
-            import json
+            from src.core.config import settings
+            from src.ocr.base import create_ocr_provider
 
-            # Load environment variables
-            load_dotenv()
+            provider = create_ocr_provider(settings)
+            ocr_markdown = provider.extract_clues(final_output_path)
 
-            # Define OCR schema
-            class Clue(BaseModel):
-                num: int
-                clue: str
+            output_md_path = output_dir / f"{stem}_final_ocr_results.md"
+            with open(output_md_path, "w") as f:
+                f.write(f"# OCR Results - {final_output_path.name}\n\n")
+                f.write(ocr_markdown)
 
-            class CrosswordClues(BaseModel):
-                ACROSS: List[Clue]
-                DOWN: List[Clue]
-
-            # Encode image
-            with open(final_output_path, "rb") as f:
-                img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-            # Run OCR
-            with Mistral(api_key=os.getenv("MISTRAL_API_KEY", "")) as mistral:
-                res = mistral.ocr.process(
-                    model="mistral-ocr-latest",
-                    document=ImageURLChunk(
-                        image_url=f"data:image/jpeg;base64,{img_b64}"
-                    ),
-                    document_annotation_format=response_format_from_pydantic_model(CrosswordClues),
-                    include_image_base64=False,
-                )
-
-                # Save results to markdown
-                output_md_path = output_dir / f"{stem}_final_ocr_results.md"
-                with open(output_md_path, "w") as f:
-                    f.write(f"# OCR Results - {final_output_path.name}\n\n")
-
-                    if hasattr(res, 'document_annotation') and res.document_annotation:
-                        # Parse the JSON string if it's a string
-                        if isinstance(res.document_annotation, str):
-                            clues = json.loads(res.document_annotation)
-                        else:
-                            clues = res.document_annotation
-
-                        # Handle dict or object
-                        if isinstance(clues, dict):
-                            f.write("## ACROSS\n\n")
-                            for clue in clues.get('ACROSS', []):
-                                if isinstance(clue, dict):
-                                    f.write(f"{clue['num']}. {clue['clue']}\n")
-                                else:
-                                    f.write(f"{clue.num}. {clue.clue}\n")
-
-                            f.write("\n## DOWN\n\n")
-                            for clue in clues.get('DOWN', []):
-                                if isinstance(clue, dict):
-                                    f.write(f"{clue['num']}. {clue['clue']}\n")
-                                else:
-                                    f.write(f"{clue.num}. {clue.clue}\n")
-                        else:
-                            f.write("## ACROSS\n\n")
-                            for clue in clues.ACROSS:
-                                f.write(f"{clue.num}. {clue.clue}\n")
-
-                            f.write("\n## DOWN\n\n")
-                            for clue in clues.DOWN:
-                                f.write(f"{clue.num}. {clue.clue}\n")
-                    else:
-                        f.write("No structured data found.\n\n")
-                        f.write(f"Raw response:\n```\n{res}\n```\n")
-
-                logger.success(f"OCR results saved to: {output_md_path}")
+            logger.success(f"OCR results saved to: {output_md_path}")
 
         except ImportError as e:
             logger.error(f"OCR dependencies not available: {e}")
-            logger.info("Install with: pip install mistralai pydantic python-dotenv")
         except Exception as e:
             logger.error(f"OCR failed: {e}")
 
