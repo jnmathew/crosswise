@@ -111,41 +111,36 @@ class CSPSolver:
         return crossings
 
     def _select_unassigned_variable(
-        self, assignment: Dict[ClueId, Word]
+        self, assignment: Dict[ClueId, Word],
+        exclude: Optional[Set[ClueId]] = None,
     ) -> Optional[ClueId]:
         """
-        Select next variable using modified MRV heuristic.
+        Select next variable using MRV (Minimum Remaining Values) heuristic.
 
-        Prefers clues with 2+ candidates over single-candidate clues,
-        since single-candidate clues have no fallback if they fail.
+        Forced moves (domain size 1) always go first — they're free.
+        After that, picks the smallest non-empty domain.
 
         Returns:
-            Unassigned clue_id with smallest domain (preferring 2+), or None if all assigned/empty.
+            Unassigned clue_id with smallest domain, or None if all assigned/empty.
         """
         best_clue = None
         best_size = float("inf")
-        # Fallback for single-candidate clues
-        single_candidate_clue = None
 
         for clue_id in self.clue_cells:
             if clue_id in assignment:
                 continue
+            if exclude and clue_id in exclude:
+                continue
 
             domain_size = len(self.domains[clue_id])
-            # Skip empty domains - they can't be assigned yet
             if domain_size == 0:
                 continue
 
-            if domain_size == 1:
-                # Save single-candidate clues for last
-                if single_candidate_clue is None:
-                    single_candidate_clue = clue_id
-            elif domain_size < best_size:
+            if domain_size < best_size:
                 best_size = domain_size
                 best_clue = clue_id
 
-        # Prefer 2+ candidates, fall back to single-candidate
-        return best_clue if best_clue else single_candidate_clue
+        return best_clue
 
     def _sorted_domain(self, clue_id: ClueId) -> List[Word]:
         """Return domain values sorted by candidate score (highest first).
@@ -390,21 +385,22 @@ class CSPSolver:
         """
         Backtracking with restarts at root level.
 
-        If the first starting clue fails, try other starting clues instead of giving up.
+        Tries different starting clues ordered by domain size (smallest first).
+        With proper MRV, fewer restarts are needed — the variable ordering
+        handles most of the work.
         """
-        # Get all assignable clues sorted by domain size (smallest first, but 2+ before 1)
+        # Get all assignable clues sorted by domain size (smallest first — forced moves first)
         candidates = []
         for clue_id in self.clue_cells:
             if clue_id in self.initially_empty:
                 continue
             size = len(self.domains[clue_id])
             if size > 0:
-                # Sort key: (is_single, size) so 2+ come before 1s
-                candidates.append((size == 1, size, clue_id))
+                candidates.append((size, clue_id))
         candidates.sort()
 
-        max_restarts = 50  # Cap restarts to avoid infinite loops
-        for i, (_, _, start_clue) in enumerate(candidates):
+        max_restarts = 50
+        for i, (_, start_clue) in enumerate(candidates):
             if i >= max_restarts:
                 print(f"  Tried {max_restarts} starting points, best partial: {len(self.best_partial)} clues")
                 break
@@ -564,15 +560,37 @@ class CSPSolver:
 
     def solve_greedy(self) -> SolveResult:
         """
-        Greedy solver - assign clues without backtracking.
+        Greedy solver — iterates all clues each round, assigns when possible.
 
-        Picks clues in MRV order and assigns first consistent candidate.
-        Fast but may miss solutions that require backtracking.
+        Phase 1: Assign all forced moves (domain size 1) — free constraint propagation.
+        Phase 2: Iterate all remaining clues, assign highest-scored consistent candidate.
+        Repeat until no more progress.
         """
         start_time = time.perf_counter()
         assignment: Dict[ClueId, Word] = {}
 
-        # Keep trying until no more progress
+        # Phase 1: Assign all forced moves (domain size == 1) first
+        # These propagate constraints and may create new forced moves
+        forced_progress = True
+        while forced_progress:
+            forced_progress = False
+            for clue_id in self.clue_cells:
+                if clue_id in assignment or clue_id in self.initially_empty:
+                    continue
+                if len(self.domains[clue_id]) != 1:
+                    continue
+                word = next(iter(self.domains[clue_id]))
+                if not self._is_consistent(clue_id, word, assignment):
+                    continue
+                assignment[clue_id] = word
+                self.nodes_expanded += 1
+                saved = self._propagate(clue_id, word, assignment)
+                if saved is None:
+                    del assignment[clue_id]
+                    continue
+                forced_progress = True
+
+        # Phase 2: Iterate all clues, assign best consistent candidate
         made_progress = True
         while made_progress:
             made_progress = False
@@ -582,22 +600,16 @@ class CSPSolver:
                 if len(self.domains[clue_id]) == 0:
                     continue
 
-                # Try each candidate (sorted by score for value ordering)
                 for word in self._sorted_domain(clue_id):
                     if self._is_consistent(clue_id, word, assignment):
                         assignment[clue_id] = word
                         self.nodes_expanded += 1
-                        # Prune crossing domains
                         saved = self._propagate(clue_id, word, assignment)
                         if saved is None:
-                            # Wipeout - undo and try next candidate
                             del assignment[clue_id]
                             continue
                         made_progress = True
                         break
-                else:
-                    # No candidate worked for this clue, skip it
-                    continue
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         assignable = len(self.clue_cells) - len(self.initially_empty)

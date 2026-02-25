@@ -1,20 +1,26 @@
 """
 SQLite-backed clue database for crossword puzzle solving.
 
-Uses a TSV file with historical clue/answer pairs as the primary data source.
-Converts TSV to SQLite on first load for efficient querying.
+Loads clue/answer pairs from two sources:
+- xd TSV (data/xd 2/clues.tsv) — ~7.5M historical pairs
+- CrosswordQA CSVs (data/crosswordqa/) — ~6.8M pairs from HuggingFace
+
+Deduplicates CrosswordQA against xd on (answer, clue_normalized) pairs.
+Converts to SQLite on first load for efficient querying.
 """
 
+import csv
 import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 import unicodedata
 
 
 # Default paths
-DEFAULT_TSV_PATH = "data/xd 2/clues.tsv"
+DEFAULT_XD_TSV_PATH = "data/xd 2/clues.tsv"
+DEFAULT_CQA_DIR = "data/crosswordqa"
 DEFAULT_DB_PATH = "data/clues.db"
 
 
@@ -51,7 +57,6 @@ class ClueDatabase:
 
     def __init__(
         self,
-        tsv_path: Optional[str] = None,
         db_path: Optional[str] = None,
         project_root: Optional[str] = None,
     ):
@@ -59,7 +64,6 @@ class ClueDatabase:
         Initialize the clue database.
 
         Args:
-            tsv_path: Path to TSV file (default: data/xd 2/clues.tsv)
             db_path: Path to SQLite database (default: data/clues.db)
             project_root: Project root directory for resolving relative paths
         """
@@ -77,7 +81,6 @@ class ClueDatabase:
         self.project_root = Path(project_root)
 
         # Resolve paths
-        self.tsv_path = Path(tsv_path) if tsv_path else self.project_root / DEFAULT_TSV_PATH
         self.db_path = Path(db_path) if db_path else self.project_root / DEFAULT_DB_PATH
 
         self._conn: Optional[sqlite3.Connection] = None
@@ -98,15 +101,26 @@ class ClueDatabase:
             self._conn.close()
             self.db_path.unlink()
 
-        # Need to build database from TSV
-        if not self.tsv_path.exists():
+        # Locate data sources
+        xd_path = self.project_root / DEFAULT_XD_TSV_PATH
+        cqa_dir = self.project_root / DEFAULT_CQA_DIR
+
+        has_xd = xd_path.exists()
+        has_cqa = (cqa_dir / "train.csv").exists()
+
+        if not has_xd and not has_cqa:
             raise FileNotFoundError(
-                f"TSV file not found: {self.tsv_path}\n"
-                f"Please add the clues.tsv file to the data directory."
+                "No clue data sources found.\n"
+                f"  xd TSV:        {xd_path} (not found)\n"
+                f"  CrosswordQA:   {cqa_dir}/ (not found)\n"
+                "Run: bash scripts/download_crosswordqa.sh"
             )
 
-        print(f"Building SQLite database from {self.tsv_path}...")
-        self._build_database()
+        print("Building SQLite clue database...")
+        self._build_database(
+            xd_path if has_xd else None,
+            cqa_dir if has_cqa else None,
+        )
 
     def _connect(self) -> None:
         """Open connection to SQLite database."""
@@ -114,16 +128,18 @@ class ClueDatabase:
         # Enable case-insensitive LIKE
         self._conn.execute("PRAGMA case_sensitive_like = OFF")
 
-    def _build_database(self) -> None:
-        """Build SQLite database from TSV file."""
+    def _build_database(
+        self,
+        xd_path: Optional[Path],
+        cqa_dir: Optional[Path],
+    ) -> None:
+        """Build SQLite database from available data sources."""
         self._conn = sqlite3.connect(str(self.db_path))
 
-        # Create table
+        # Create table (no pubid/year — never queried)
         self._conn.execute("""
             CREATE TABLE clues (
                 id INTEGER PRIMARY KEY,
-                pubid TEXT,
-                year INTEGER,
                 answer TEXT NOT NULL,
                 clue TEXT NOT NULL,
                 clue_normalized TEXT NOT NULL,
@@ -131,12 +147,51 @@ class ClueDatabase:
             )
         """)
 
-        # Bulk insert from TSV
+        xd_count = 0
+        if xd_path:
+            xd_count = self._load_xd_tsv(xd_path)
+
+        cqa_count = 0
+        if cqa_dir:
+            # Build dedup set from xd data already loaded
+            dedup: Set[Tuple[str, str]] = set()
+            if xd_count > 0:
+                print("  Building dedup index from xd data...")
+                cursor = self._conn.execute(
+                    "SELECT DISTINCT answer, clue_normalized FROM clues"
+                )
+                for row in cursor:
+                    dedup.add((row[0], row[1]))
+                print(f"  Dedup index: {len(dedup):,} unique (answer, clue) pairs")
+
+            cqa_count = self._load_crosswordqa(cqa_dir, dedup)
+
+        total = xd_count + cqa_count
+        print(f"  Total: {total:,} clue/answer pairs")
+
+        # Create indexes
+        print("  Creating indexes...")
+        self._conn.execute("CREATE INDEX idx_clue_normalized ON clues(clue_normalized)")
+        self._conn.execute("CREATE INDEX idx_length ON clues(length)")
+        self._conn.execute("CREATE INDEX idx_answer ON clues(answer)")
+        self._conn.execute("CREATE INDEX idx_clue_length ON clues(clue_normalized, length)")
+
+        self._conn.commit()
+        print(f"Database saved to {self.db_path}")
+
+    def _load_xd_tsv(self, path: Path) -> int:
+        """Load clue/answer pairs from xd TSV file.
+
+        Returns:
+            Number of rows inserted.
+        """
+        print(f"  Loading xd TSV from {path}...")
+
         batch_size = 10000
         batch = []
         total_inserted = 0
 
-        with open(self.tsv_path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             # Skip header
             next(f)
 
@@ -145,7 +200,7 @@ class ClueDatabase:
                 if len(parts) < 4:
                     continue
 
-                pubid, year_str, answer, clue = parts[0], parts[1], parts[2], parts[3]
+                answer, clue = parts[2], parts[3]
 
                 # Skip empty answers
                 if not answer or not answer.strip():
@@ -158,48 +213,118 @@ class ClueDatabase:
                 if not answer.isalpha():
                     continue
 
-                # Parse year
-                try:
-                    year = int(year_str) if year_str else 0
-                except ValueError:
-                    year = 0
-
                 # Normalize clue for fuzzy matching
                 clue_normalized = normalize_clue_text(clue)
 
-                batch.append((pubid, year, answer, clue, clue_normalized, len(answer)))
+                batch.append((answer, clue, clue_normalized, len(answer)))
 
                 if len(batch) >= batch_size:
                     self._conn.executemany(
-                        "INSERT INTO clues (pubid, year, answer, clue, clue_normalized, length) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO clues (answer, clue, clue_normalized, length) "
+                        "VALUES (?, ?, ?, ?)",
                         batch
                     )
                     total_inserted += len(batch)
                     if total_inserted % 500000 == 0:
-                        print(f"  Inserted {total_inserted:,} rows...")
+                        print(f"    {total_inserted:,} rows...")
                     batch = []
 
         # Insert remaining
         if batch:
             self._conn.executemany(
-                "INSERT INTO clues (pubid, year, answer, clue, clue_normalized, length) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO clues (answer, clue, clue_normalized, length) "
+                "VALUES (?, ?, ?, ?)",
                 batch
             )
             total_inserted += len(batch)
 
-        print(f"  Total: {total_inserted:,} clue/answer pairs")
+        print(f"  xd: {total_inserted:,} rows loaded")
+        return total_inserted
 
-        # Create indexes
-        print("  Creating indexes...")
-        self._conn.execute("CREATE INDEX idx_clue_normalized ON clues(clue_normalized)")
-        self._conn.execute("CREATE INDEX idx_length ON clues(length)")
-        self._conn.execute("CREATE INDEX idx_answer ON clues(answer)")
-        self._conn.execute("CREATE INDEX idx_clue_length ON clues(clue_normalized, length)")
+    def _load_crosswordqa(
+        self,
+        cqa_dir: Path,
+        dedup: Set[Tuple[str, str]],
+    ) -> int:
+        """Load clue/answer pairs from CrosswordQA CSVs, deduplicating against existing data.
 
-        self._conn.commit()
-        print(f"Database saved to {self.db_path}")
+        Args:
+            cqa_dir: Directory containing train.csv and valid.csv
+            dedup: Set of (answer, clue_normalized) pairs already in the database
+
+        Returns:
+            Number of new rows inserted.
+        """
+        print(f"  Loading CrosswordQA from {cqa_dir}/...")
+
+        batch_size = 10000
+        batch = []
+        total_inserted = 0
+        skipped_dup = 0
+        skipped_invalid = 0
+
+        for csv_name in ("train.csv", "valid.csv"):
+            csv_path = cqa_dir / csv_name
+            if not csv_path.exists():
+                print(f"    {csv_name} not found, skipping")
+                continue
+
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                # Skip header
+                next(reader, None)
+
+                for row in reader:
+                    # CSV columns: id, clue, answer
+                    if len(row) < 3:
+                        continue
+
+                    clue, answer = row[1], row[2]
+
+                    # Clean answer: strip spaces, uppercase
+                    answer = answer.strip().replace(" ", "").upper()
+
+                    # Skip empty or non-alpha answers
+                    if not answer or not answer.isalpha():
+                        skipped_invalid += 1
+                        continue
+
+                    clue_normalized = normalize_clue_text(clue)
+
+                    # Deduplicate against xd
+                    pair = (answer, clue_normalized)
+                    if pair in dedup:
+                        skipped_dup += 1
+                        continue
+
+                    # Add to dedup set so we don't insert CQA duplicates either
+                    dedup.add(pair)
+
+                    batch.append((answer, clue, clue_normalized, len(answer)))
+
+                    if len(batch) >= batch_size:
+                        self._conn.executemany(
+                            "INSERT INTO clues (answer, clue, clue_normalized, length) "
+                            "VALUES (?, ?, ?, ?)",
+                            batch
+                        )
+                        total_inserted += len(batch)
+                        if total_inserted % 500000 == 0:
+                            print(f"    {total_inserted:,} rows...")
+                        batch = []
+
+        # Insert remaining
+        if batch:
+            self._conn.executemany(
+                "INSERT INTO clues (answer, clue, clue_normalized, length) "
+                "VALUES (?, ?, ?, ?)",
+                batch
+            )
+            total_inserted += len(batch)
+
+        print(f"  CrosswordQA: {total_inserted:,} new rows "
+              f"({skipped_dup:,} duplicates, {skipped_invalid:,} invalid skipped)")
+        return total_inserted
 
     def lookup_by_clue(
         self,

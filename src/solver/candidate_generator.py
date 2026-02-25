@@ -559,6 +559,7 @@ def bouncer_filter(
     db: Optional["ClueDatabase"] = None,
     word_index: Optional[Any] = None,
     clue_text_lookup: Optional[Dict[str, str]] = None,
+    candidate_sources: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, List["ScoredCandidate"]]:
     """
     Cross-reference LLM candidates against DB and word index (Bouncer Filter).
@@ -575,6 +576,7 @@ def bouncer_filter(
         db: ClueDatabase for answer verification
         word_index: WordIndex for membership testing and Broda scores
         clue_text_lookup: Optional dict of clue_id -> clue text (for DB clue match bonus)
+        candidate_sources: Optional dict of clue_id -> {word -> source_label} for accurate source tracking
 
     Returns:
         Dict mapping clue_id to list of ScoredCandidate, sorted by score.
@@ -633,8 +635,14 @@ def bouncer_filter(
             confidence = min(base_score + broda_bonus + clue_bonus, 1.0)
             verified = is_in_db or is_in_index
 
+            # Use tracked source if available, otherwise infer from verification
+            if candidate_sources and clue_id in candidate_sources:
+                source = candidate_sources[clue_id].get(word_upper, "llm")
+            else:
+                source = "llm"
+
             clue_scores.append(
-                ScoredCandidate(word=word_upper, source="llm", confidence=confidence, verified=verified)
+                ScoredCandidate(word=word_upper, source=source, confidence=confidence, verified=verified)
             )
 
         # Sort by confidence descending (best candidates first)
@@ -854,6 +862,7 @@ def generate_with_claude(
     clues: List[ClueInput],
     candidates_per_clue: int = DEFAULT_CANDIDATES_PER_CLUE,
     batch_size: int = 15,
+    model: str = "claude-opus-4-20250514",
 ) -> Dict[str, List[str]]:
     """
     Generate candidates using Anthropic Claude API.
@@ -882,10 +891,7 @@ def generate_with_claude(
     client = anthropic.Anthropic(api_key=api_key)
     all_candidates: Dict[str, List[str]] = {}
 
-    for i in range(0, len(clues), batch_size):
-        batch = clues[i:i + batch_size]
-
-        # Build clue list
+    def _process_batch(batch: List[ClueInput]) -> Dict[str, List[str]]:
         clue_lines = []
         for c in batch:
             if c.pattern and "_" in c.pattern:
@@ -912,7 +918,7 @@ Example: {{"1-across": ["PARIS", "LYONS"], "2-down": ["ECHO", "ARIA"]}}"""
 
         try:
             response = client.messages.create(
-                model="claude-opus-4-20250514",
+                model=model,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}]
             )
@@ -936,10 +942,23 @@ Example: {{"1-across": ["PARIS", "LYONS"], "2-down": ["ECHO", "ARIA"]}}"""
                     filtered.append(word)
                 batch_candidates[clue_id] = filtered
 
-            all_candidates.update(batch_candidates)
+            return batch_candidates
 
         except Exception as e:
             print(f"  Warning: Claude API error: {e}")
+            return {}
+
+    batches = [clues[i:i + batch_size] for i in range(0, len(clues), batch_size)]
+
+    if len(batches) <= 1:
+        for batch in batches:
+            all_candidates.update(_process_batch(batch))
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=len(batches)) as executor:
+            futures = {executor.submit(_process_batch, batch): i for i, batch in enumerate(batches)}
+            for future in as_completed(futures):
+                all_candidates.update(future.result())
 
     return all_candidates
 
@@ -985,12 +1004,13 @@ def ensure_minimum_candidates(
             continue
         needs_more.append(clue)
 
-    # Generate with Claude Opus for all clues needing more candidates
+    # Generate with Claude Sonnet for all clues needing more candidates
     if needs_more:
-        print(f"  Generating {len(needs_more)} clues with Claude Opus...")
+        print(f"  Padding {len(needs_more)} clues with Claude Sonnet...")
         claude_candidates = generate_with_claude(
             needs_more,
-            candidates_per_clue=min_candidates,
+            candidates_per_clue=min_candidates * 3,  # Over-request; length filter drops ~50%
+            model="claude-sonnet-4-20250514",
         )
         for clue_id, cands in claude_candidates.items():
             existing = set(candidates.get(clue_id, []))
@@ -1444,3 +1464,82 @@ Respond with ONLY a JSON object: {{"clue_id": ["BEST", "SECOND", ...], ...}}"""
             print(f"    Warning: Extended thinking error: {e}")
 
     return all_results
+
+
+def generate_anchors(
+    clue_inputs: List[ClueInput],
+    candidates: Dict[str, List[str]],
+    clue_text_lookup: Dict[str, str],
+    batch_size: int = 40,
+) -> Dict[str, str]:
+    """Ask Claude Opus which clue answers it's highly confident about.
+
+    Returns a dict of clue_id -> word for answers Opus considers near-certain.
+    These can be seeded into the CSP solver as anchors.
+    """
+    import anthropic
+
+    # Build clue lines with their candidate lists
+    clue_lines = []
+    clue_ids_in_order = []
+    for ci in clue_inputs:
+        cands = candidates.get(ci.clue_id, [])
+        if not cands:
+            continue
+        text = clue_text_lookup.get(ci.clue_id, ci.text)
+        cand_str = ", ".join(cands[:10])  # top 10 candidates
+        clue_lines.append(f'{ci.clue_id}: "{text}" ({ci.length} letters) → [{cand_str}]')
+        clue_ids_in_order.append(ci.clue_id)
+
+    if not clue_lines:
+        return {}
+
+    # Batch if needed
+    all_anchors: Dict[str, str] = {}
+    for i in range(0, len(clue_lines), batch_size):
+        batch_lines = clue_lines[i:i + batch_size]
+
+        prompt = f"""You are a crossword puzzle expert. For each clue below, I've listed candidate answers.
+Pick ONLY answers where you are ABSOLUTELY CERTAIN — the kind where any crossword solver would immediately ink it in without hesitation. Think: "— ex machina" = DEUS, "Wildebeest" = GNU.
+
+Rules:
+- ONLY pick answers that are definitionally unambiguous — one obvious right answer
+- Skip clues that have multiple plausible candidates (e.g., "Fat" could be LARD, SUET, FLAB — skip it)
+- Skip clues where the answer depends on crossings to disambiguate
+- Aim for 10-15 anchors max, not every clue
+- Return a JSON object mapping clue_id to your confident answer
+
+Clues:
+{chr(10).join(batch_lines)}
+
+Return ONLY a JSON object like {{"14-across": "DEUS", "8-across": "APSE"}}, no other text."""
+
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-opus-4-20250514",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        text = response.content[0].text.strip()
+        # Strip markdown fences if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text[:text.rfind("```")]
+            text = text.strip()
+
+        try:
+            batch_anchors = json.loads(text)
+            # Validate: only keep anchors that are actually in the candidate list
+            for clue_id, word in batch_anchors.items():
+                word_upper = word.upper()
+                cands_upper = [c.upper() for c in candidates.get(clue_id, [])]
+                if word_upper in cands_upper:
+                    all_anchors[clue_id] = word_upper
+                else:
+                    print(f"  Anchor {clue_id}={word} not in candidates, skipping")
+        except (json.JSONDecodeError, AttributeError) as e:
+            print(f"  Warning: anchor parse error: {e}")
+
+    return all_anchors

@@ -3,9 +3,8 @@ Unified Crossword Word Index.
 
 Loads multiple word list files into a single in-memory set for fast
 membership testing and pattern matching. Sources:
-- Broda List (classical crosswordese, high-frequency fill)
-- Crossword Nexus List (broad contemporary coverage)
-- Spread the Wordlist (additional depth)
+- Broda List (classical crosswordese, high-frequency fill, 0-100 quality scores)
+- Crossword Nexus Collaborative Word List (MIT licensed, 567K+ entries)
 
 All words are normalized to uppercase with spaces/hyphens stripped.
 Supports semicolon-scored format (WORD;SCORE) and plain word-per-line format.
@@ -19,8 +18,7 @@ from typing import Dict, List, Optional, Set
 # Default paths relative to project root
 DEFAULT_WORD_LIST_PATHS = [
     "data/wordlists/peter-broda-wordlist__gridtext__scored__july-25-2023.txt",
-    "data/wordlists/crosswordnexuswordlist.txt",
-    "data/wordlists/spreadthewordlist.txt",
+    "data/wordlists/xwordlist.dict",
 ]
 
 

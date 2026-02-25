@@ -65,7 +65,7 @@ Respond with ONLY the JSON array, no other text."""
 
     client = anthropic.Anthropic()
     response = client.messages.create(
-        model="claude-opus-4-20250514",
+        model="claude-sonnet-4-20250514",
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
