@@ -71,6 +71,58 @@ def run_grid_detection(session_dir: Path, config: Settings) -> Dict[str, Any]:
     }
 
 
+def run_manual_crop(session_dir: Path, corners: list[list[float]], config: Settings) -> Dict[str, Any]:
+    """Re-run grid detection with user-specified quad corners."""
+    from src.core.image_preprocessing import preprocess
+    from src.core.grid_detection import detect_grid, assign_clue_numbers, compute_clue_slots
+
+    original_path = session_dir / "original.jpg"
+    manual_quad = np.array(corners, dtype="float32")
+
+    result = preprocess(original_path, config, manual_quad=manual_quad)
+
+    # Save warped images (overwrite previous detection)
+    cv2.imwrite(str(session_dir / "warped.jpg"), result["warped"])
+    cv2.imwrite(str(session_dir / "warped_gray.jpg"), result["warped_gray"])
+
+    # Detect grid on the new warp
+    grid_result = detect_grid(result["warped_gray"], config)
+    cells = grid_result["cells"]
+    assign_clue_numbers(cells)
+    clue_slots = compute_clue_slots(cells)
+
+    rows = len(cells)
+    cols = len(cells[0]) if rows > 0 else 0
+
+    cells_data = []
+    for r in range(rows):
+        row_data = []
+        for c in range(cols):
+            cell = cells[r][c]
+            row_data.append({
+                "row": cell.row,
+                "col": cell.col,
+                "is_block": cell.is_block,
+                "clue_number": cell.clue_number,
+            })
+        cells_data.append(row_data)
+
+    grid_data = {
+        "rows": rows,
+        "cols": cols,
+        "cells": cells_data,
+        "clue_slots": clue_slots,
+    }
+
+    with open(session_dir / "grid_data.json", "w") as f:
+        json.dump(grid_data, f, indent=2)
+
+    return {
+        "grid_size": (rows, cols),
+        "clue_slot_count": len(clue_slots),
+    }
+
+
 def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[str, Any]:
     """Recompute grid clue numbers and slots from user-edited black cell map."""
     from src.core.grid_detection import assign_clue_numbers, compute_clue_slots
@@ -122,6 +174,61 @@ def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[st
         "grid_size": (rows, cols),
         "clue_slot_count": len(clue_slots),
         "clue_number_count": clue_number_count,
+    }
+
+
+def resize_grid(session_dir: Path, rows: int, cols: int) -> Dict[str, Any]:
+    """Re-detect black cells at new grid dimensions using evenly-spaced lines."""
+    from src.core.grid_detection import classify_black_cells, assign_clue_numbers, compute_clue_slots
+    from src.core.models import Cell
+
+    warped_path = session_dir / "warped_gray.jpg"
+    warped_gray = cv2.imread(str(warped_path), cv2.IMREAD_GRAYSCALE)
+    if warped_gray is None:
+        raise FileNotFoundError(f"warped_gray.jpg not found in session directory")
+
+    h, w = warped_gray.shape[:2]
+
+    # Evenly divide into rows x cols
+    xs = [round(i * w / cols) for i in range(cols + 1)]
+    ys = [round(i * h / rows) for i in range(rows + 1)]
+
+    cells = classify_black_cells(warped_gray, xs, ys)
+    assign_clue_numbers(cells)
+    clue_slots = compute_clue_slots(cells)
+
+    # Serialize and save
+    cells_data = []
+    black_cells = []
+    for r in range(rows):
+        row_data = []
+        row_blacks = []
+        for c in range(cols):
+            cell = cells[r][c]
+            row_data.append({
+                "row": cell.row,
+                "col": cell.col,
+                "is_block": cell.is_block,
+                "clue_number": cell.clue_number,
+            })
+            row_blacks.append(cell.is_block)
+        cells_data.append(row_data)
+        black_cells.append(row_blacks)
+
+    grid_data = {
+        "rows": rows,
+        "cols": cols,
+        "cells": cells_data,
+        "clue_slots": clue_slots,
+    }
+
+    with open(session_dir / "grid_data.json", "w") as f:
+        json.dump(grid_data, f, indent=2)
+
+    return {
+        "grid_size": [rows, cols],
+        "clue_slot_count": len(clue_slots),
+        "black_cells": black_cells,
     }
 
 
@@ -283,8 +390,14 @@ def _run_solve(
         ClueInput,
     )
     from src.solver.csp import solve_csp, extract_letter_patterns
+    from src.solver.llm_solver import solve_with_llm
     from src.solver.clue_database import ClueDatabase
     from src.solver.generate_hints import generate_hints_batch
+
+    import time as _time
+    _t0 = _time.time()
+    def _elapsed():
+        return f"[{_time.time() - _t0:.1f}s]"
 
     session_mgr.update_status(session_id, SessionStatus.SOLVING)
 
@@ -303,148 +416,164 @@ def _run_solve(
             clue_text_lookup[f"{clue['number']}-{direction}"] = clue["text"]
 
     # Generate candidates (DB lookup + Claude fallback instead of OpenAI)
+    print(f"{_elapsed()} Starting candidate generation")
     put_progress(SolveProgress(stage="candidates", message="Database lookup...", progress=0.1))
     db = ClueDatabase()
     candidates = generate_candidates_with_database(
         clue_inputs, db=db, candidates_per_clue=12, use_llm_fallback=False
     )
 
-    # Claude fallback for clues not found in database
+    # Track which candidates came from DB vs LLM
+    # candidate_sources: clue_id -> {word -> source_label}
+    candidate_sources: Dict[str, Dict[str, str]] = {}
+    for cid, words in candidates.items():
+        candidate_sources[cid] = {w.upper(): "db" for w in words}
+
+    # Run Opus (zero-DB-hit clues) and Sonnet padding (<5 candidates) in parallel
     clues_needing_llm = [c for c in clue_inputs if not candidates.get(c.clue_id)]
+    clues_needing_pad = [c for c in clue_inputs if 0 < len(candidates.get(c.clue_id, [])) < 5]
+
+    put_progress(SolveProgress(
+        stage="candidates",
+        message=f"Generating candidates ({len(clues_needing_llm)} Opus + {len(clues_needing_pad)} Sonnet padding)...",
+        progress=0.15,
+    ))
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _run_opus():
+        if clues_needing_llm:
+            return generate_with_claude(clues_needing_llm, candidates_per_clue=12)
+        return {}
+
+    def _run_sonnet_pad():
+        if clues_needing_pad:
+            return generate_with_claude(clues_needing_pad, candidates_per_clue=15, model="claude-sonnet-4-20250514")
+        return {}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        opus_future = executor.submit(_run_opus)
+        sonnet_future = executor.submit(_run_sonnet_pad)
+        opus_cands = opus_future.result()
+        sonnet_cands = sonnet_future.result()
+
+    # Merge Opus candidates
+    candidates.update(opus_cands)
+    for cid, words in opus_cands.items():
+        candidate_sources.setdefault(cid, {})
+        for w in words:
+            candidate_sources[cid].setdefault(w.upper(), "llm")
     if clues_needing_llm:
-        put_progress(SolveProgress(
-            stage="candidates",
-            message=f"Claude generating for {len(clues_needing_llm)} clues...",
-            progress=0.15,
-        ))
-        claude_cands = generate_with_claude(clues_needing_llm, candidates_per_clue=12)
-        candidates.update(claude_cands)
-        print(f"  Claude generated: {sum(1 for v in claude_cands.values() if v)}/{len(clues_needing_llm)} clues")
+        print(f"  {_elapsed()} Opus generated: {sum(1 for v in opus_cands.values() if v)}/{len(clues_needing_llm)} clues")
 
-    # Ensure minimum candidates per clue
-    put_progress(SolveProgress(stage="candidates", message="Ensuring minimum candidates...", progress=0.2))
-    candidates = ensure_minimum_candidates(
-        clue_inputs, candidates, db=db, min_candidates=5,
-    )
+    # Merge Sonnet padding candidates
+    for cid, words in sonnet_cands.items():
+        existing = set(candidates.get(cid, []))
+        for w in words:
+            if w not in existing:
+                existing.add(w)
+        candidates[cid] = list(existing)
+        candidate_sources.setdefault(cid, {})
+        for w in words:
+            candidate_sources[cid].setdefault(w.upper(), "sonnet")
+    if clues_needing_pad:
+        print(f"  {_elapsed()} Sonnet padded: {len(clues_needing_pad)} clues")
 
+    # Second-pass: catch any clues still under 5 (e.g. Opus clues that returned few results)
+    still_under = [c for c in clue_inputs if len(candidates.get(c.clue_id, [])) < 5]
+    if still_under:
+        print(f"  {_elapsed()} Second-pass padding for {len(still_under)} clues still under 5")
+        extra = generate_with_claude(still_under, candidates_per_clue=15, model="claude-sonnet-4-20250514")
+        for cid, words in extra.items():
+            existing = set(candidates.get(cid, []))
+            for w in words:
+                if w not in existing:
+                    existing.add(w)
+            candidates[cid] = list(existing)
+            candidate_sources.setdefault(cid, {})
+            for w in words:
+                candidate_sources[cid].setdefault(w.upper(), "sonnet")
+
+    print(f"{_elapsed()} Padding complete")
     # Bouncer filter: score and sort candidates by DB/word-index verification
     put_progress(SolveProgress(stage="candidates", message="Scoring candidates...", progress=0.25))
-    scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup)
+    scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources)
     score_map = to_score_map(scored)
     candidates = to_plain_candidates(scored)
 
     total = len(clue_inputs)
 
-    def _run_csp_best_of_n(candidates, score_map, n=3, label=""):
-        """Run CSP solver n times and return the best result."""
-        best = {}
-        for attempt in range(n):
-            r = solve_csp(
-                solver_input, candidates, return_partial=True,
-                candidate_scores=score_map, mac_mode="search-only",
-            )
-            if len(r.assignment) > len(best):
-                best = r.assignment.copy()
-            if r.solved:
-                break
-        return best
+    # LLM iterative solver — replaces CSP + refinement passes
+    print(f"{_elapsed()} Starting LLM iterative solver")
 
-    # Pass 1: Solve with search-only MAC (skip AC-3 preprocessing that can wipe out domains)
-    put_progress(SolveProgress(stage="solving", message="Running CSP solver (pass 1, best of 3)...", progress=0.3))
-    best_assignment = _run_csp_best_of_n(candidates, score_map, n=3, label="pass 1")
-
-    # Multi-pass pattern refinement (up to 4 additional passes)
-    # Each pass: extract crossing-letter patterns → regenerate candidates → re-solve
-    max_passes = 4
-    for pass_num in range(2, 2 + max_passes):
-        if len(best_assignment) >= total or len(best_assignment) == 0:
-            break
-
+    def _llm_progress(pass_num, solved_count, total_count):
         put_progress(SolveProgress(
             stage="solving",
-            message=f"Pass {pass_num}: {len(best_assignment)}/{total} solved. Refining with patterns...",
-            progress=0.3 + 0.08 * (pass_num - 1),
+            message=f"LLM pass {pass_num}: {solved_count}/{total_count} solved...",
+            progress=0.3 + 0.05 * pass_num,
         ))
 
-        # Use best assignment for patterns (more known letters = better patterns)
-        patterns = extract_letter_patterns(solver_input, best_assignment)
-        unsolved_with_patterns = {
-            cid: pat for cid, pat in patterns.items()
-            if "_" in pat and pat.count("_") < len(pat)
-        }
+    assignment = solve_with_llm(
+        solver_input, clue_text_lookup, candidates,
+        max_passes=6,
+        progress_callback=_llm_progress,
+    )
+    print(f"{_elapsed()} LLM solver: {len(assignment)}/{total}")
 
-        if not unsolved_with_patterns:
-            break
-
-        constrained_clues = []
-        for clue_id, pattern in unsolved_with_patterns.items():
-            text = clue_text_lookup.get(clue_id, "")
-            constrained_clues.append(ClueInput(
-                clue_id=clue_id,
-                text=text,
-                length=len(pattern),
-                pattern=pattern,
-                category=categorize_clue(text),
-                num_crossings=solver_input.crossing_count(clue_id),
-            ))
-
-        # DB pattern matching first
-        new_candidates = regenerate_with_patterns(
-            constrained_clues, db=db, candidates_per_clue=16,
+    # CSP cleanup for any remaining unsolved clues
+    if len(assignment) < total and len(assignment) > 0:
+        print(f"{_elapsed()} Running CSP cleanup on {total - len(assignment)} remaining clues")
+        put_progress(SolveProgress(
+            stage="solving",
+            message=f"CSP cleanup: {total - len(assignment)} clues remaining...",
+            progress=0.55,
+        ))
+        r = solve_csp(
+            solver_input, candidates, return_partial=True,
+            candidate_scores=score_map, mac_mode="search-only",
+            seed_assignment=assignment,
         )
+        if len(r.assignment) > len(assignment):
+            assignment = r.assignment
+            print(f"{_elapsed()} CSP cleanup: {len(assignment)}/{total}")
 
-        # Claude fallback for clues where DB pattern matching found nothing or few results
-        clues_for_llm = [
-            c for c in constrained_clues
-            if len(new_candidates.get(c.clue_id, [])) < 3
-        ]
-        if clues_for_llm:
-            put_progress(SolveProgress(
-                stage="solving",
-                message=f"Claude generating for {len(clues_for_llm)} clues with patterns...",
-                progress=0.32 + 0.08 * (pass_num - 1),
-            ))
-            claude_candidates = generate_with_claude(
-                clues_for_llm, candidates_per_clue=12,
-            )
-            for cid, cands in claude_candidates.items():
-                if cands:
-                    existing = new_candidates.get(cid, [])
-                    new_candidates[cid] = existing + cands
-
-        # Merge new candidates into main pool
-        added = 0
-        for clue_id, cands in new_candidates.items():
-            if cands:
-                existing = set(candidates.get(clue_id, []))
-                new_unique = [c.upper() for c in cands if c.upper() not in existing]
-                if new_unique:
-                    candidates[clue_id] = list(existing) + new_unique
-                    added += 1
-
-        if added == 0:
-            break
-
-        # Re-score after adding new candidates
-        scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup)
-        score_map = to_score_map(scored)
-        candidates = to_plain_candidates(scored)
-
-        put_progress(SolveProgress(
-            stage="solving",
-            message=f"Running CSP solver (pass {pass_num}, best of 3)...",
-            progress=0.35 + 0.08 * (pass_num - 1),
-        ))
-        # Fresh solve with enriched candidate pool (no seeding — locks in wrong answers)
-        assignment = _run_csp_best_of_n(candidates, score_map, n=3, label=f"pass {pass_num}")
-
-        # Keep the best assignment across all passes
-        if len(assignment) > len(best_assignment):
-            best_assignment = assignment.copy()
-
-    # Use the best assignment found across all passes
-    assignment = best_assignment
     solved = len(assignment)
+
+    # Final scoring for diagnostics (ensures all clues are represented)
+    final_scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources)
+
+    # Save per-clue diagnostics
+    diagnostics = []
+    for ci in clue_inputs:
+        cid = ci.clue_id
+        cands = final_scored.get(cid, [])
+        answer = assignment.get(cid)
+        if answer:
+            status = "solved"
+        elif not cands:
+            status = "no_candidates"
+        else:
+            status = "unsolved"
+        diagnostics.append({
+            "clue_id": cid,
+            "text": clue_text_lookup.get(cid, ""),
+            "length": ci.length,
+            "category": ci.category,
+            "candidates": [
+                {
+                    "word": sc.word,
+                    "source": sc.source,
+                    "confidence": round(sc.confidence, 3),
+                    "verified": sc.verified,
+                }
+                for sc in cands
+            ],
+            "candidate_count": len(cands),
+            "assigned_answer": answer,
+            "status": status,
+        })
+    with open(session_dir / "solve_diagnostics.json", "w") as f:
+        json.dump(diagnostics, f, indent=2)
 
     put_progress(SolveProgress(
         stage="solved",
@@ -453,6 +582,7 @@ def _run_solve(
     ))
 
     # Generate hints
+    print(f"{_elapsed()} CSP complete, starting hints")
     session_mgr.update_status(session_id, SessionStatus.GENERATING_HINTS)
     solved_clues = []
     for direction in ("across", "down"):
@@ -469,19 +599,29 @@ def _run_solve(
                 })
 
     if solved_clues:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         batch_size = 20
+        batches = [solved_clues[i:i + batch_size] for i in range(0, len(solved_clues), batch_size)]
+        total_batches = len(batches)
+        put_progress(SolveProgress(
+            stage="hints",
+            message=f"Generating hints ({total_batches} batches in parallel)...",
+            progress=0.6,
+        ))
+
         all_hints: List[Dict[str, str]] = []
-        for i in range(0, len(solved_clues), batch_size):
-            batch = solved_clues[i : i + batch_size]
-            batch_num = i // batch_size + 1
-            total_batches = (len(solved_clues) + batch_size - 1) // batch_size
-            put_progress(SolveProgress(
-                stage="hints",
-                message=f"Generating hints (batch {batch_num}/{total_batches})...",
-                progress=0.6 + 0.35 * (i / len(solved_clues)),
-            ))
-            hints = generate_hints_batch(batch)
-            all_hints.extend(hints)
+        with ThreadPoolExecutor(max_workers=total_batches) as executor:
+            futures = {executor.submit(generate_hints_batch, batch): i for i, batch in enumerate(batches)}
+            for future in as_completed(futures):
+                batch_num = futures[future] + 1
+                hints = future.result()
+                all_hints.extend(hints)
+                put_progress(SolveProgress(
+                    stage="hints",
+                    message=f"Hints batch {batch_num}/{total_batches} done",
+                    progress=0.6 + 0.35 * (len(all_hints) / len(solved_clues)),
+                ))
 
         # Map hints back
         hint_map = {h["id"]: h for h in all_hints}
@@ -502,4 +642,5 @@ def _run_solve(
         solved_count=solved, total_clues=total,
     )
 
+    print(f"{_elapsed()} Done")
     put_progress(SolveProgress(stage="complete", message="Puzzle ready!", progress=1.0))

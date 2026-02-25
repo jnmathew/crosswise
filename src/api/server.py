@@ -23,6 +23,9 @@ from src.api.models import (
     SolveStatusResponse,
     GridEditRequest,
     GridEditResponse,
+    GridResizeRequest,
+    GridResizeResponse,
+    ManualCropRequest,
 )
 from src.api.session_manager import SessionManager
 from src.api import pipeline
@@ -47,6 +50,11 @@ app.add_middleware(
 # Serve session files (images)
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/api/files", StaticFiles(directory=str(SESSIONS_DIR)), name="session_files")
+
+
+@app.get("/api/config")
+async def get_config():
+    return {"ocr_provider": settings.OCR_PROVIDER}
 
 
 @app.post("/api/upload", response_model=UploadResponse)
@@ -98,6 +106,55 @@ async def edit_grid(session_id: str, edit: GridEditRequest):
         clue_slot_count=result["clue_slot_count"],
         clue_number_count=result["clue_number_count"],
         grid_size=list(result["grid_size"]),
+    )
+
+
+@app.post("/api/{session_id}/resize-grid", response_model=GridResizeResponse)
+async def resize_grid(session_id: str, req: GridResizeRequest):
+    session_dir = session_mgr.get_session_dir(session_id)
+    if req.rows < 3 or req.rows > 30 or req.cols < 3 or req.cols > 30:
+        raise HTTPException(400, "Rows and cols must be between 3 and 30")
+    try:
+        result = pipeline.resize_grid(session_dir, req.rows, req.cols)
+    except Exception as e:
+        raise HTTPException(422, f"Grid resize failed: {e}")
+
+    return GridResizeResponse(
+        grid_size=result["grid_size"],
+        clue_slot_count=result["clue_slot_count"],
+        black_cells=result["black_cells"],
+    )
+
+
+@app.post("/api/{session_id}/manual-crop", response_model=UploadResponse)
+async def manual_crop(session_id: str, req: ManualCropRequest):
+    """Re-run grid detection with user-specified quad corners."""
+    session_dir = session_mgr.get_session_dir(session_id)
+    if not (session_dir / "original.jpg").exists():
+        raise HTTPException(404, "No original image found for this session")
+
+    if len(req.corners) != 4 or any(len(c) != 2 for c in req.corners):
+        raise HTTPException(400, "corners must be exactly 4 points, each [x, y]")
+
+    try:
+        result = pipeline.run_manual_crop(session_dir, req.corners, settings)
+    except Exception as e:
+        raise HTTPException(422, f"Manual crop failed: {e}")
+
+    session_mgr.update_status(
+        session_id,
+        SessionStatus.GRID_DETECTED,
+        grid_size=result["grid_size"],
+        clue_slot_count=result["clue_slot_count"],
+    )
+
+    return UploadResponse(
+        session_id=session_id,
+        status=SessionStatus.GRID_DETECTED,
+        grid_size=list(result["grid_size"]),
+        clue_slot_count=result["clue_slot_count"],
+        warped_grid_url=f"/api/files/{session_id}/warped.jpg",
+        original_image_url=f"/api/files/{session_id}/original.jpg",
     )
 
 
@@ -190,6 +247,18 @@ async def stream_progress(session_id: str):
                 yield f'data: {{"stage":"heartbeat","message":"Still working...","progress":-1}}\n\n'
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/{session_id}/diagnostics")
+async def get_diagnostics(session_id: str):
+    """Return per-clue solve diagnostics (candidates, sources, scores)."""
+    import json as _json
+    session_dir = session_mgr.get_session_dir(session_id)
+    diag_path = session_dir / "solve_diagnostics.json"
+    if not diag_path.exists():
+        raise HTTPException(404, "No diagnostics available — solve has not run yet")
+    with open(diag_path) as f:
+        return _json.load(f)
 
 
 @app.get("/api/{session_id}/status", response_model=SolveStatusResponse)

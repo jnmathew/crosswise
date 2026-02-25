@@ -67,3 +67,18 @@ class GridEditResponse(BaseModel):
     clue_slot_count: int
     clue_number_count: int
     grid_size: list[int]
+
+
+class GridResizeRequest(BaseModel):
+    rows: int
+    cols: int
+
+
+class GridResizeResponse(BaseModel):
+    grid_size: list[int]
+    clue_slot_count: int
+    black_cells: list[list[bool]]
+
+
+class ManualCropRequest(BaseModel):
+    corners: list[list[float]]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
