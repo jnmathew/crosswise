@@ -356,6 +356,10 @@ def _contour_quad_from_mask(mask: np.ndarray, approx_eps: float = 0.02) -> Optio
     """
     Extract largest quadrilateral contour from binary mask.
 
+    If the largest contour has >4 vertices (e.g., L-shape from two adjacent
+    grids connected by a fold) but is significantly larger than the first
+    clean quad, extracts the largest 4-vertex sub-quad from its vertices.
+
     Args:
         mask: Binary mask image
         approx_eps: Epsilon for contour approximation (fraction of perimeter)
@@ -368,12 +372,56 @@ def _contour_quad_from_mask(mask: np.ndarray, approx_eps: float = 0.02) -> Optio
         return None
 
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+    # Find the first clean quad via polygon approximation
+    first_quad = None
+    first_quad_area = 0
     for c in contours:
         peri = cv2.arcLength(c, True)
         approx = cv2.approxPolyDP(c, approx_eps * peri, True)
         if len(approx) == 4:
-            return approx.reshape(4, 2).astype("float32")
-    return None
+            first_quad = approx.reshape(4, 2).astype("float32")
+            first_quad_area = cv2.contourArea(c)
+            break
+
+    # Check if the largest contour has >4 vertices but is significantly
+    # larger than the first clean quad. This happens when folds/creases
+    # create L-shaped contours connecting two adjacent grids.
+    largest = contours[0]
+    largest_area = cv2.contourArea(largest)
+    largest_peri = cv2.arcLength(largest, True)
+    largest_approx = cv2.approxPolyDP(largest, approx_eps * largest_peri, True)
+    n_verts = len(largest_approx)
+
+    if (
+        5 <= n_verts <= 8
+        and largest_area > first_quad_area * 1.5
+    ):
+        # Try all 4-vertex subsets to find the largest convex sub-quad
+        from itertools import combinations
+
+        verts = largest_approx.reshape(-1, 2).astype("float32")
+        best_sub_area = 0
+        best_sub_quad = None
+
+        for combo in combinations(range(n_verts), 4):
+            quad = verts[list(combo)]
+            area = abs(cv2.contourArea(quad))
+            if area <= best_sub_area:
+                continue
+            # Must be convex (no self-intersections)
+            if len(cv2.convexHull(quad, returnPoints=False)) == 4:
+                best_sub_area = area
+                best_sub_quad = quad
+
+        if best_sub_quad is not None and best_sub_area > first_quad_area * 1.3:
+            logger.debug(
+                f"Extracted sub-quad (area={best_sub_area:.0f}) from {n_verts}-vertex "
+                f"contour, {best_sub_area / first_quad_area:.1f}x larger than first quad"
+            )
+            return best_sub_quad
+
+    return first_quad
 
 
 def _is_valid_quad(pts: np.ndarray, image_shape: Tuple[int, int, int], min_area_ratio: float = 0.05) -> bool:

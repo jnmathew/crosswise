@@ -90,13 +90,14 @@ def _validate_grid_lines(lines: List[int], image_size: int) -> List[int]:
     spacings = np.array([deduped[i+1] - deduped[i] for i in range(len(deduped) - 1)])
     median_spacing = np.median(spacings)
 
-    # Remove lines with spacing < 40% or > 250% of median (very extreme)
+    # Remove lines with spacing < 30% or > 300% of median (very extreme)
+    # Wider bounds to preserve boundary lines with slightly different spacing from warp distortion
     filtered = [deduped[0]]
     for i in range(len(deduped) - 1):
         spacing = deduped[i+1] - deduped[i]
         ratio = spacing / median_spacing
 
-        if 0.4 <= ratio <= 2.5:
+        if 0.3 <= ratio <= 3.0:
             filtered.append(deduped[i+1])
         else:
             logger.debug(f"Removing extreme outlier at {deduped[i+1]} (spacing={spacing:.1f}, median={median_spacing:.1f}, ratio={ratio:.2f})")
@@ -119,8 +120,9 @@ def _merge_close(indices: List[int], median_spacing: float) -> List[int]:
         return []
 
     # Use median spacing to determine merge threshold
-    # Merge if peaks are closer than 40% of expected spacing
-    merge_threshold = max(12, int(median_spacing * 0.4)) if median_spacing > 0 else 12
+    # Merge if peaks are closer than 30% of expected spacing
+    # Lower threshold prevents merging legitimate adjacent grid lines
+    merge_threshold = max(12, int(median_spacing * 0.3)) if median_spacing > 0 else 12
 
     indices = sorted(indices)
     merged = [indices[0]]
@@ -146,9 +148,12 @@ def _auto_peaks(
     """
     Automatically choose a good peak threshold for one axis (x or y).
 
-    Tries multiple thresholds and picks the candidate with:
-    - count in a reasonable range
-    - relatively regular spacing (low jitter)
+    Uses a two-phase selection strategy:
+    Phase 1: Among "excellent" candidates (very low jitter), prefer the most lines.
+             More lines = more complete grid detection.
+    Phase 2: Among "acceptable" candidates (jitter within bounds), prefer the
+             highest threshold. Higher threshold = cleaner, more reliable peaks.
+    Fallback: Best overall scoring if nothing passes jitter filters.
 
     Args:
         signal_sm: Smoothed 1D projection signal
@@ -163,8 +168,13 @@ def _auto_peaks(
     Returns:
         Best candidate grid line positions
     """
-    best_score = -1.0
-    best_lines: List[int] = []
+    excellent_jitter = max_spacing_jitter * 0.4  # Very regular spacing
+
+    # Collect candidates at each threshold
+    excellent: List[tuple] = []   # (n, thr, lines) — very regular
+    acceptable: List[tuple] = []  # (thr, lines) — jitter within bounds
+    fallback_score = -1.0
+    fallback_lines: List[int] = []
 
     for thr in rel_thresholds:
         cand = _find_peaks(signal_sm, min_distance, threshold_rel=thr)
@@ -184,7 +194,17 @@ def _auto_peaks(
         jitter = float(np.std(spacings) / median)
         n = len(cand)
 
-        # Scoring: prefer counts in [min_lines, max_lines] and low jitter
+        logger.debug(
+            f"{axis}-axis thr={thr:.2f}: n={n}, jitter={jitter:.3f}"
+        )
+
+        if min_lines <= n <= max_lines:
+            if jitter < excellent_jitter:
+                excellent.append((n, thr, cand))
+            if jitter < max_spacing_jitter:
+                acceptable.append((thr, cand))
+
+        # Fallback scoring for when nothing passes jitter filters
         count_score = 1.0 - min(
             1.0,
             abs(n - (min_lines + max_lines) / 2)
@@ -192,27 +212,110 @@ def _auto_peaks(
         )
         jitter_penalty = min(1.0, jitter / max_spacing_jitter)
         score = max(0.0, count_score) * (1.0 - jitter_penalty)
+        if score > fallback_score:
+            fallback_score = score
+            fallback_lines = cand
 
-        # Small bonus for higher threshold (cleaner peaks)
-        score += 0.05 * thr
-
+    # Phase 1: Among excellent candidates, prefer the most lines (then highest threshold)
+    if excellent:
+        best = max(excellent, key=lambda x: (x[0], x[1]))
         logger.debug(
-            f"{axis}-axis thr={thr:.2f}: n={n}, jitter={jitter:.3f}, score={score:.3f}"
+            f"{axis}-axis: phase 1 selected n={best[0]} at thr={best[1]:.2f} (excellent jitter)"
         )
+        return best[2]
 
-        if score > best_score:
-            best_score = score
-            best_lines = cand
+    # Phase 2: Among acceptable candidates, prefer highest threshold (cleanest peaks)
+    if acceptable:
+        best = max(acceptable, key=lambda x: x[0])
+        logger.debug(
+            f"{axis}-axis: phase 2 selected n={len(best[1])} at thr={best[0]:.2f} (acceptable jitter)"
+        )
+        return best[1]
 
-        # Early exit if this candidate is already quite good
-        if (
-            min_lines <= n <= max_lines
-            and jitter < max_spacing_jitter * 0.7
-        ):
-            logger.debug(f"{axis}-axis: early exit with excellent candidate (n={n}, jitter={jitter:.3f})")
-            break
+    # Fallback: best overall scoring
+    logger.debug(
+        f"{axis}-axis: fallback selected n={len(fallback_lines)}"
+    )
+    return fallback_lines
 
-    return best_lines
+
+def _recover_boundary_lines(
+    lines: List[int],
+    signal: np.ndarray,
+    image_size: int,
+    axis: str,
+) -> List[int]:
+    """
+    Check if boundary lines (first/last) are missing and recover them.
+
+    If the first detected line is suspiciously far from the image edge
+    (> 0.6x median spacing), search for a missing boundary line at the
+    expected position using the projection signal.
+
+    Args:
+        lines: Detected grid line positions (sorted)
+        signal: Smoothed projection signal for this axis
+        image_size: Total image dimension
+        axis: "x" or "y" for logging
+
+    Returns:
+        Lines with recovered boundaries prepended/appended as needed
+    """
+    if len(lines) < 3:
+        return lines
+
+    spacings = np.diff(lines)
+    median_spacing = float(np.median(spacings))
+    if median_spacing <= 0:
+        return lines
+
+    # Compute threshold: 20% of the median known peak strength
+    # Lower threshold accommodates boundary lines which often have weaker signal
+    # due to the grid line being partially outside the warped image
+    known_strengths = [float(signal[p]) for p in lines if 0 <= p < len(signal)]
+    if not known_strengths:
+        return lines
+    min_strength = np.median(known_strengths) * 0.2
+
+    result = list(lines)
+
+    # Check leading boundary (first line far from position 0)
+    # Use 0.35x median as threshold — catches missing boundaries while
+    # the signal strength check prevents false positives
+    if lines[0] > median_spacing * 0.3:
+        # Clamp expected position to valid image bounds
+        expected_pos = max(0, lines[0] - int(round(median_spacing)))
+        # Search in a window around expected position, clamped to image bounds
+        search_lo = max(0, expected_pos - int(median_spacing * 0.3))
+        search_hi = min(len(signal) - 1, expected_pos + int(median_spacing * 0.3))
+        window = signal[search_lo : search_hi + 1]
+        if len(window) > 0:
+            local_peak = search_lo + int(np.argmax(window))
+            if signal[local_peak] >= min_strength:
+                logger.debug(
+                    f"{axis}-axis: recovering leading boundary at {local_peak} "
+                    f"(expected ~{expected_pos}, strength={signal[local_peak]:.0f}, min={min_strength:.0f})"
+                )
+                result.insert(0, local_peak)
+
+    # Check trailing boundary (last line far from image edge)
+    trailing_gap = image_size - 1 - lines[-1]
+    if trailing_gap > median_spacing * 0.3:
+        # Clamp expected position to valid image bounds
+        expected_pos = min(image_size - 1, lines[-1] + int(round(median_spacing)))
+        search_lo = max(0, expected_pos - int(median_spacing * 0.3))
+        search_hi = min(len(signal) - 1, expected_pos + int(median_spacing * 0.3))
+        window = signal[search_lo : search_hi + 1]
+        if len(window) > 0:
+            local_peak = search_lo + int(np.argmax(window))
+            if signal[local_peak] >= min_strength:
+                logger.debug(
+                    f"{axis}-axis: recovering trailing boundary at {local_peak} "
+                    f"(expected ~{expected_pos}, strength={signal[local_peak]:.0f}, min={min_strength:.0f})"
+                )
+                result.append(local_peak)
+
+    return result
 
 
 def _detect_grid_lines_by_projection(warped_gray: np.ndarray) -> Tuple[List[int], List[int]]:
@@ -265,6 +368,10 @@ def _detect_grid_lines_by_projection(warped_gray: np.ndarray) -> Tuple[List[int]
         axis="y",
         min_distance=row_min_dist,
     )
+
+    # Recover missing boundary lines at image edges
+    xs = _recover_boundary_lines(xs, col_sm, w, axis="x")
+    ys = _recover_boundary_lines(ys, row_sm, h, axis="y")
 
     logger.info(f"Adaptive grid detection: {len(xs)} vertical, {len(ys)} horizontal lines")
 
@@ -388,6 +495,128 @@ def _detect_grid_intersections(warped_gray: np.ndarray) -> List[Tuple[float, flo
     return intersections
 
 
+def classify_black_cells(warped_gray: np.ndarray, xs: List[int], ys: List[int]) -> List[List[Cell]]:
+    """
+    Classify cells as black or white using adaptive thresholding.
+
+    Divides the warped image into cells based on grid line positions,
+    computes mean intensity per cell, and applies an adaptive threshold
+    to classify each cell.
+
+    Args:
+        warped_gray: Grayscale warped grid image
+        xs: x-coordinates of vertical grid lines (len = cols + 1)
+        ys: y-coordinates of horizontal grid lines (len = rows + 1)
+
+    Returns:
+        2D list of Cell objects with is_block set
+    """
+    h, w = warped_gray.shape[:2]
+    num_rows = len(ys) - 1
+    num_cols = len(xs) - 1
+
+    # First pass: collect all cell intensities for adaptive thresholding
+    cell_intensities = []
+    for r in range(num_rows):
+        y0 = ys[r]
+        y1 = ys[r + 1] if r + 1 < len(ys) else h
+
+        for c in range(num_cols):
+            x0 = xs[c]
+            x1 = xs[c + 1] if c + 1 < len(xs) else w
+
+            cell_crop = warped_gray[y0:y1, x0:x1]
+            if cell_crop.size > 0:
+                cell_intensities.append(cell_crop.mean())
+
+    # Compute adaptive threshold using multiple methods and select best
+    if cell_intensities:
+        intensities_array = np.array(cell_intensities)
+
+        # Method 1: Otsu's method
+        intensities_uint8 = intensities_array.astype(np.uint8)
+        otsu_threshold, _ = cv2.threshold(
+            intensities_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+
+        # Method 2: Percentile-based (assume 15-25% of cells are black)
+        percentile_threshold = np.percentile(intensities_array, 23)
+
+        # Method 3: Look for gap in intensity distribution (dark vs light cells)
+        sorted_intensities = np.sort(intensities_array)
+        search_range = int(len(sorted_intensities) * 0.40)
+        if search_range > 1:
+            diffs = np.diff(sorted_intensities[:search_range])
+            if len(diffs) > 0:
+                gap_idx = np.argmax(diffs)
+                gap_size = diffs[gap_idx]
+                gap_threshold = (sorted_intensities[gap_idx] + sorted_intensities[gap_idx + 1]) / 2
+            else:
+                gap_size = 0
+                gap_threshold = percentile_threshold
+        else:
+            gap_size = 0
+            gap_threshold = percentile_threshold
+
+        if 40 <= gap_threshold <= 150 and 3 <= gap_size <= 15:
+            threshold = gap_threshold
+            method_used = "gap"
+            logger.debug(f"Using gap method: clean separation with gap of {gap_size:.1f} units")
+        elif 40 <= otsu_threshold <= 120:
+            threshold = otsu_threshold
+            method_used = "otsu"
+            logger.debug(f"Using Otsu: threshold in reasonable range ({otsu_threshold:.1f})")
+        elif 40 <= percentile_threshold <= 150:
+            threshold = percentile_threshold
+            method_used = "percentile"
+            if gap_size > 15:
+                logger.debug(f"Using percentile: large gap ({gap_size:.1f}) suggests multiple clusters")
+        elif 40 <= gap_threshold <= 150:
+            threshold = gap_threshold
+            method_used = "gap_fallback"
+        else:
+            threshold = otsu_threshold
+            method_used = "otsu_fallback"
+
+        logger.info(
+            f"Adaptive threshold: {threshold:.1f} (method={method_used}, "
+            f"otsu={otsu_threshold}, percentile={percentile_threshold:.1f}, gap={gap_threshold:.1f}, gap_size={gap_size:.1f})"
+        )
+    else:
+        threshold = 55
+        logger.warning(f"No cells found, using fallback threshold: {threshold}")
+
+    # Second pass: classify cells using adaptive threshold
+    cells: List[List[Cell]] = []
+    idx = 0
+    for r in range(num_rows):
+        row_cells = []
+        y0 = ys[r]
+        y1 = ys[r + 1] if r + 1 < len(ys) else h
+
+        for c in range(num_cols):
+            x0 = xs[c]
+            x1 = xs[c + 1] if c + 1 < len(xs) else w
+
+            cell_crop = warped_gray[y0:y1, x0:x1]
+
+            if cell_crop.size > 0 and idx < len(cell_intensities):
+                mean_intensity = cell_intensities[idx]
+                is_black = bool(mean_intensity < threshold)
+                idx += 1
+            else:
+                is_black = False
+
+            cell = Cell(row=r, col=c, is_block=is_black)
+            row_cells.append(cell)
+
+        cells.append(row_cells)
+
+    black_count = sum(1 for row in cells for cell in row if cell.is_block)
+    logger.info(f"Classified {black_count} black cells using threshold={threshold}")
+    return cells
+
+
 def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
     """
     Detect grid structure from warped puzzle image.
@@ -436,118 +665,9 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
 
     logger.info(f"Grid detected: {num_rows} rows × {num_cols} cols (method: {method})")
 
-    # Build Cell grid
-    cells: List[List[Cell]] = []
-    h, w = warped_gray.shape[:2]
+    cells = classify_black_cells(warped_gray, xs, ys)
 
-    # First pass: collect all cell intensities for adaptive thresholding
-    cell_intensities = []
-    for r in range(num_rows):
-        y0 = ys[r]
-        y1 = ys[r + 1] if r + 1 < len(ys) else h
-
-        for c in range(num_cols):
-            x0 = xs[c]
-            x1 = xs[c + 1] if c + 1 < len(xs) else w
-
-            cell_crop = warped_gray[y0:y1, x0:x1]
-            if cell_crop.size > 0:
-                cell_intensities.append(cell_crop.mean())
-
-    # Compute adaptive threshold using multiple methods and select best
-    if cell_intensities:
-        intensities_array = np.array(cell_intensities)
-
-        # Method 1: Otsu's method
-        intensities_uint8 = intensities_array.astype(np.uint8)
-        otsu_threshold, _ = cv2.threshold(
-            intensities_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )
-
-        # Method 2: Percentile-based (assume 15-25% of cells are black)
-        # Use 23rd percentile as balanced estimate across different puzzles
-        percentile_threshold = np.percentile(intensities_array, 23)
-
-        # Method 3: Look for gap in intensity distribution (dark vs light cells)
-        # Sort intensities and find largest gap in lower 40% of cells
-        sorted_intensities = np.sort(intensities_array)
-        search_range = int(len(sorted_intensities) * 0.40)  # Look in lower 40%
-        if search_range > 1:
-            diffs = np.diff(sorted_intensities[:search_range])
-            if len(diffs) > 0:
-                gap_idx = np.argmax(diffs)
-                gap_size = diffs[gap_idx]
-                gap_threshold = (sorted_intensities[gap_idx] + sorted_intensities[gap_idx + 1]) / 2
-            else:
-                gap_size = 0
-                gap_threshold = percentile_threshold
-        else:
-            gap_size = 0
-            gap_threshold = percentile_threshold
-
-        # Intelligent selection based on gap size and Otsu:
-        # - Small gap (3-15 units): indicates subtle but clear threshold → use gap method
-        # - Large gap (>15 units): check if Otsu is reasonable, otherwise use percentile
-        # - Very small gap (<3): use Otsu if in range, otherwise percentile
-        if 40 <= gap_threshold <= 150 and 3 <= gap_size <= 15:
-            threshold = gap_threshold
-            method_used = "gap"
-            logger.debug(f"Using gap method: clean separation with gap of {gap_size:.1f} units")
-        elif 40 <= otsu_threshold <= 120:
-            # Prefer Otsu when it's in a reasonable range (40-120)
-            threshold = otsu_threshold
-            method_used = "otsu"
-            logger.debug(f"Using Otsu: threshold in reasonable range ({otsu_threshold:.1f})")
-        elif 40 <= percentile_threshold <= 150:
-            threshold = percentile_threshold
-            method_used = "percentile"
-            if gap_size > 15:
-                logger.debug(f"Using percentile: large gap ({gap_size:.1f}) suggests multiple clusters")
-        elif 40 <= gap_threshold <= 150:
-            threshold = gap_threshold
-            method_used = "gap_fallback"
-        else:
-            threshold = otsu_threshold
-            method_used = "otsu_fallback"
-
-        logger.info(
-            f"Adaptive threshold: {threshold:.1f} (method={method_used}, "
-            f"otsu={otsu_threshold}, percentile={percentile_threshold:.1f}, gap={gap_threshold:.1f}, gap_size={gap_size:.1f})"
-        )
-    else:
-        threshold = 55  # Fallback
-        logger.warning(f"No cells found, using fallback threshold: {threshold}")
-
-    # Second pass: classify cells using adaptive threshold
-    idx = 0
-    for r in range(num_rows):
-        row_cells = []
-        y0 = ys[r]
-        y1 = ys[r + 1] if r + 1 < len(ys) else h
-
-        for c in range(num_cols):
-            x0 = xs[c]
-            x1 = xs[c + 1] if c + 1 < len(xs) else w
-
-            # Extract cell crop
-            cell_crop = warped_gray[y0:y1, x0:x1]
-
-            # Classify using adaptive threshold
-            if cell_crop.size > 0 and idx < len(cell_intensities):
-                mean_intensity = cell_intensities[idx]
-                is_black = bool(mean_intensity < threshold)
-                idx += 1
-            else:
-                is_black = False
-
-            cell = Cell(row=r, col=c, is_block=is_black)
-            row_cells.append(cell)
-
-        cells.append(row_cells)
-
-    # Count black cells for metadata
     black_count = sum(1 for row in cells for cell in row if cell.is_block)
-    logger.info(f"Classified {black_count} black cells using threshold={threshold}")
 
     return {
         "cells": cells,
