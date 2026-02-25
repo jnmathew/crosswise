@@ -135,8 +135,11 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 ```
 
 **clue_database.py** - SQLite-backed clue database:
-- Loads `data/xd 2/clues.tsv` (7.5M clue/answer pairs from historical crosswords)
-- Converts to SQLite on first use (`data/clues.db`)
+- Two data sources: xd TSV (7.5M pairs) + CrosswordQA from HuggingFace (6.8M pairs)
+- CrosswordQA deduplicated against xd on (answer, clue_normalized) — ~9-11M total after dedup
+- Download CrosswordQA: `bash scripts/download_crosswordqa.sh`
+- Converts to SQLite on first use (`data/clues.db`); delete DB to force rebuild from sources
+- Simplified schema: `(id, answer, clue, clue_normalized, length)` — no pubid/year
 - Provides fast lookup by clue text, pattern matching, and answer length
 - Pattern matching uses GLOB (e.g., `C_T` matches `CAT`, `COT`, `CUT`)
 
@@ -160,12 +163,31 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 - Conflict-Directed Backjumping (CDBJ)
 - 50 random starting points, best-of-N runs to combat nondeterminism
 
+**llm_solver.py** - LLM-based iterative solver (primary solver):
+- Multi-pass architecture: commit high-confidence answers first, propagate crossing letters
+- Anthropic `web_search_20250305` server-side tool for proper noun / factual verification
+- `find_conflict_clusters()` — detects dead-end patterns (crossing letters match no valid word), traces blame to wrong committed answers, groups into connected clusters
+- `resolve_conflict_cluster()` — removes blamed answers from grid, asks LLM to re-solve the cluster jointly with web search available
+- Post-resolution follow-up pass picks up newly-unblocked clues after conflict resolution frees crossing letters
+- Handles `pause_turn` stop reason for server-side search continuation loops
+
 **generate_hints.py** - AI hint generation:
 - Batch hint + explanation generation using Claude
 - One hint and one explanation per solved clue
 
-**Solving Strategy**:
-1. Database lookup finds ~70% of clues from 7.5M historical pairs
+**Solving Strategy** (LLM solver — default):
+1. Database lookup finds ~70% of clues from ~9-11M historical pairs (xd + CrosswordQA)
+2. Claude Opus fallback generates candidates for remaining clues
+3. Bouncer filter scores all candidates by DB/word-index verification
+4. LLM iterative solve: 6 passes of commit → propagate crossing letters → re-solve
+5. Web search verification for proper nouns and ambiguous factual clues (~$0.01/search)
+6. Conflict resolution: detect dead-end patterns → trace blamed crossings → LLM re-solves clusters
+7. Post-resolution pass to fill newly-unblocked clues
+8. CSP cleanup for any remaining unsolved clues
+9. Hint generation runs in parallel after solve
+
+**Solving Strategy** (CSP solver — legacy):
+1. Database lookup finds ~70% of clues
 2. Claude Opus fallback generates candidates for remaining clues
 3. Bouncer filter scores all candidates by DB/word-index verification
 4. Best-of-3 CSP solve with score-based value ordering
