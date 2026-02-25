@@ -50,8 +50,8 @@ export default function CrosswordPlayer() {
   const [toast, setToast] = useState<string | null>(null);
   const [checkResult, setCheckResult] = useState<'correct' | 'incorrect' | 'incomplete' | null>(null);
 
-  // Editable puzzle name
-  const [puzzleName, setPuzzleName] = useState('');
+  // Editable puzzle name (null = use derived default from puzzle metadata)
+  const [nameOverride, setNameOverride] = useState<string | null>(null);
   const [editingName, setEditingName] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -61,8 +61,22 @@ export default function CrosswordPlayer() {
   // Togglable correct counter
   const [showCounter, setShowCounter] = useState(() => {
     const stored = localStorage.getItem('crosswise-show-counter');
-    return stored !== 'false'; // default to visible
+    return stored === 'true'; // default to hidden
   });
+
+  // Collapsible solve banner
+  const [bannerExpanded, setBannerExpanded] = useState(true);
+
+  // Solve diagnostics
+  type DiagCandidate = { word: string; source: string; confidence: number; verified: boolean };
+  type DiagClue = {
+    clue_id: string; text: string; length: number; category: string | null;
+    candidates: DiagCandidate[]; candidate_count: number;
+    assigned_answer: string | null; status: 'solved' | 'unsolved' | 'no_candidates';
+  };
+  const [diagnostics, setDiagnostics] = useState<DiagClue[] | null>(null);
+  const [diagOpen, setDiagOpen] = useState(false);
+  const [diagExpandedClue, setDiagExpandedClue] = useState<string | null>(null);
 
   // Refs for auto-scrolling clue lists
   const acrossCluesRef = useRef<HTMLDivElement>(null);
@@ -72,12 +86,7 @@ export default function CrosswordPlayer() {
   const userGridRef = useRef<Record<string, string>>({});
   const [userCorrectCount, setUserCorrectCount] = useState(0);
 
-  // Initialize puzzle name from metadata
-  useEffect(() => {
-    if (puzzle) {
-      setPuzzleName(puzzle.metadata.name || puzzleId.replace('IMG_', 'Puzzle #'));
-    }
-  }, [puzzle, puzzleId]);
+  const puzzleName = nameOverride ?? (puzzle?.metadata.name || puzzleId.replace('IMG_', 'Puzzle #'));
 
   // Check if puzzle is still being solved (has unsolved clues)
   const isSolving = useMemo(() => {
@@ -93,21 +102,46 @@ export default function CrosswordPlayer() {
   const sseUrl = isSolving ? `/api/${puzzleId}/progress` : null;
   const { data: progress, done: solveDone } = useSSE(sseUrl);
 
+  // Show a toast that auto-dismisses after a timeout
+  const showToast = useCallback((message: string, duration = 5000) => {
+    setToast(message);
+    return setTimeout(() => setToast(null), duration);
+  }, []);
+
   // Refetch puzzle when solve completes
   useEffect(() => {
     if (solveDone && progress?.stage === 'complete') {
       refetch();
-      setToast('Puzzle solved! Hints are now available.');
-      const timer = setTimeout(() => setToast(null), 5000);
+      const timer = showToast('Puzzle solved! Hints are now available.');
       return () => clearTimeout(timer);
     }
     if (solveDone && progress?.stage === 'failed') {
       refetch();
-      setToast('Solve finished with partial results.');
-      const timer = setTimeout(() => setToast(null), 5000);
+      const timer = showToast('Solve finished with partial results.');
       return () => clearTimeout(timer);
     }
-  }, [solveDone, progress?.stage, refetch]);
+  }, [solveDone, progress?.stage, refetch, showToast]);
+
+  // Fetch solve diagnostics, guarding against non-JSON responses
+  const fetchDiagnostics = useCallback(() => {
+    if (!puzzleId) return;
+    fetch(`/api/${puzzleId}/diagnostics`)
+      .then((r) => {
+        const ct = r.headers.get('content-type') || '';
+        if (r.ok && ct.includes('application/json')) return r.json();
+        return null;
+      })
+      .then((data) => { if (data) setDiagnostics(data); })
+      .catch(() => {});
+  }, [puzzleId]);
+
+  // Fetch diagnostics once solve completes
+  useEffect(() => {
+    if (solveDone && progress?.stage === 'complete') fetchDiagnostics();
+  }, [solveDone, progress?.stage, fetchDiagnostics]);
+
+  // Also try to load diagnostics on mount (for already-solved puzzles)
+  useEffect(() => { fetchDiagnostics(); }, [fetchDiagnostics]);
 
   // Scroll active clue into view in the clue list
   const scrollClueIntoView = useCallback((dir: Direction, num: number) => {
@@ -157,7 +191,7 @@ export default function CrosswordPlayer() {
 
   // onClueSelected fires when a clue is clicked in the list (not from cell clicks).
   // ClueTracker handles all sources via context, but we keep this for the callback prop.
-  const handleClueSelected = useCallback((_direction: Direction, _number: string) => {
+  const handleClueSelected = useCallback(() => {
     // ClueTracker handles state updates — no-op here to avoid double-updates
   }, []);
 
@@ -252,7 +286,7 @@ export default function CrosswordPlayer() {
   }, [activeDirection, activeNumber, activeClue, revealAnswer]);
 
   const savePuzzleName = useCallback((name: string) => {
-    setPuzzleName(name);
+    setNameOverride(name);
     setEditingName(false);
     fetch(`/api/puzzles/${puzzleId}`, {
       method: 'PATCH',
@@ -289,32 +323,141 @@ export default function CrosswordPlayer() {
         <h1 style={styles.brand}>Crosswise</h1>
       </Link>
 
-      {/* Solve progress banner */}
+      {/* Solve progress banner (collapsible) */}
       {isSolving && (
         <div style={styles.solveBanner}>
-          <div style={styles.solveBannerContent}>
-            <div style={styles.spinner} />
-            <span>
-              {progress
-                ? progress.message
-                : 'Solving puzzle in the background...'}
+          <div
+            style={styles.solveBannerHeader}
+            onClick={() => setBannerExpanded((v) => !v)}
+          >
+            <div style={styles.solveBannerContent}>
+              <div style={styles.spinner} />
+              <span>
+                {progress
+                  ? progress.message
+                  : 'Solving puzzle in the background...'}
+              </span>
+            </div>
+            <span style={styles.bannerToggle}>
+              {bannerExpanded ? '\u25B2' : '\u25BC'}
             </span>
           </div>
-          {progress && progress.progress >= 0 && progress.progress <= 1 && (
-            <div style={styles.bannerProgress}>
-              <div
-                style={{
-                  ...styles.bannerProgressFill,
-                  width: `${Math.round(progress.progress * 100)}%`,
-                }}
-              />
-            </div>
+          {bannerExpanded && (
+            <>
+              {progress && progress.progress >= 0 && progress.progress <= 1 && (
+                <div style={styles.bannerProgress}>
+                  <div
+                    style={{
+                      ...styles.bannerProgressFill,
+                      width: `${Math.round(progress.progress * 100)}%`,
+                    }}
+                  />
+                </div>
+              )}
+              <p style={styles.solveBannerSub}>
+                You can start filling in answers while the solver works. Hints will appear when ready.
+              </p>
+            </>
           )}
-          <p style={styles.solveBannerSub}>
-            You can start filling in answers while the solver works. Hints will appear when ready.
-          </p>
         </div>
       )}
+
+      {/* Solve diagnostics panel */}
+      {diagnostics && (() => {
+        const solvedCount = diagnostics.filter((d) => d.status === 'solved').length;
+        const unsolved = diagnostics.filter((d) => d.status !== 'solved');
+        return (
+          <div style={styles.diagPanel}>
+            <div style={styles.diagHeader} onClick={() => setDiagOpen((v) => !v)}>
+              <span>
+                Solve Log: {solvedCount}/{diagnostics.length} clues solved
+                {unsolved.length > 0 && `. ${unsolved.length} unsolved.`}
+              </span>
+              <span style={styles.bannerToggle}>{diagOpen ? '\u25B2' : '\u25BC'}</span>
+            </div>
+            {diagOpen && (
+              <div style={styles.diagBody}>
+                {unsolved.length > 0 && (
+                  <div style={{ marginBottom: '8px' }}>
+                    <strong>Unsolved clues:</strong>
+                    {unsolved.map((d) => (
+                      <div key={d.clue_id} style={styles.diagClue}>
+                        <div
+                          style={styles.diagClueHeader}
+                          onClick={() => setDiagExpandedClue(
+                            diagExpandedClue === d.clue_id ? null : d.clue_id
+                          )}
+                        >
+                          <span><strong>{d.clue_id}</strong>: {d.text} ({d.length} letters)</span>
+                          <span style={{ fontSize: '11px', color: '#999' }}>
+                            {d.candidate_count === 0
+                              ? 'no candidates'
+                              : `${d.candidate_count} candidates`}
+                            {' '}{diagExpandedClue === d.clue_id ? '\u25B2' : '\u25BC'}
+                          </span>
+                        </div>
+                        {diagExpandedClue === d.clue_id && d.candidates.length > 0 && (
+                          <div style={styles.diagCandidates}>
+                            {d.candidates.slice(0, 20).map((c, i) => (
+                              <div key={i} style={styles.diagCandRow}>
+                                <span style={{ fontFamily: 'monospace' }}>{c.word}</span>
+                                <span style={{ color: '#888', fontSize: '11px' }}>
+                                  {c.source} &middot; {Math.round(c.confidence * 100)}%
+                                  {c.verified && ' \u2713'}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <details>
+                  <summary style={{ cursor: 'pointer', fontSize: '13px', color: '#666' }}>
+                    All clues ({diagnostics.length})
+                  </summary>
+                  {diagnostics.map((d) => (
+                    <div key={d.clue_id} style={styles.diagClue}>
+                      <div
+                        style={styles.diagClueHeader}
+                        onClick={() => setDiagExpandedClue(
+                          diagExpandedClue === d.clue_id ? null : d.clue_id
+                        )}
+                      >
+                        <span>
+                          <strong>{d.clue_id}</strong>: {d.text} ({d.length})
+                          {d.assigned_answer && (
+                            <span style={{ color: '#16a34a', marginLeft: '6px' }}>
+                              = {d.assigned_answer}
+                            </span>
+                          )}
+                        </span>
+                        <span style={{ fontSize: '11px', color: '#999' }}>
+                          {d.candidate_count} cands {diagExpandedClue === d.clue_id ? '\u25B2' : '\u25BC'}
+                        </span>
+                      </div>
+                      {diagExpandedClue === d.clue_id && d.candidates.length > 0 && (
+                        <div style={styles.diagCandidates}>
+                          {d.candidates.slice(0, 20).map((c, i) => (
+                            <div key={i} style={styles.diagCandRow}>
+                              <span style={{ fontFamily: 'monospace' }}>{c.word}</span>
+                              <span style={{ color: '#888', fontSize: '11px' }}>
+                                {c.source} &middot; {Math.round(c.confidence * 100)}%
+                                {c.verified && ' \u2713'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </details>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Toast notification */}
       {toast && (
@@ -331,11 +474,11 @@ export default function CrosswordPlayer() {
             ref={nameInputRef}
             style={styles.nameInput}
             value={puzzleName}
-            onChange={(e) => setPuzzleName(e.target.value)}
+            onChange={(e) => setNameOverride(e.target.value)}
             onBlur={() => savePuzzleName(puzzleName)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') savePuzzleName(puzzleName);
-              if (e.key === 'Escape') { setPuzzleName(puzzle!.metadata.name || puzzleId); setEditingName(false); }
+              if (e.key === 'Escape') { setNameOverride(null); setEditingName(false); }
             }}
           />
         ) : (
@@ -484,11 +627,22 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%',
     maxWidth: '1100px',
   },
+  solveBannerHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    cursor: 'pointer',
+  },
   solveBannerContent: {
     display: 'flex',
     alignItems: 'center',
     gap: '10px',
-    marginBottom: '6px',
+  },
+  bannerToggle: {
+    fontSize: '12px',
+    color: '#6b7280',
+    userSelect: 'none' as const,
+    padding: '0 4px',
   },
   solveBannerSub: {
     margin: '4px 0 0 0',
@@ -701,5 +855,53 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '60px',
     fontSize: '18px',
     color: '#c44',
+  },
+  diagPanel: {
+    padding: '10px 16px',
+    backgroundColor: '#fefce8',
+    border: '1px solid #fde68a',
+    borderRadius: '8px',
+    fontSize: '13px',
+    color: '#92400e',
+    marginBottom: '12px',
+    width: '100%',
+    maxWidth: '1100px',
+  },
+  diagHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    cursor: 'pointer',
+    fontWeight: 600,
+  },
+  diagBody: {
+    marginTop: '8px',
+    maxHeight: '400px',
+    overflowY: 'auto' as const,
+  },
+  diagClue: {
+    margin: '4px 0',
+    padding: '6px 8px',
+    backgroundColor: '#fffbeb',
+    borderRadius: '4px',
+    border: '1px solid #fef3c7',
+  },
+  diagClueHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    cursor: 'pointer',
+    fontSize: '13px',
+  },
+  diagCandidates: {
+    marginTop: '4px',
+    paddingLeft: '12px',
+    borderLeft: '2px solid #fde68a',
+  },
+  diagCandRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    padding: '1px 0',
+    fontSize: '12px',
   },
 };

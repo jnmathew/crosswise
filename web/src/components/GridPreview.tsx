@@ -26,7 +26,7 @@ export default function GridPreview({ data, onConfirm, onReupload }: GridPreview
           Re-upload
         </button>
         <button style={styles.primaryButton} onClick={onConfirm}>
-          Looks Good &rarr;
+          Edit Grid &rarr;
         </button>
       </div>
     </div>

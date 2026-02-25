@@ -1,45 +1,40 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUploadPipeline } from '../hooks/useUploadPipeline';
-import { useSSE } from '../hooks/useSSE';
-import type { UploadResponse, MaskData, MaskResponse } from '../types/api';
-import GridPreview from './GridPreview';
+import type { UploadResponse, MaskData } from '../types/api';
 import GridEditor from './GridEditor';
+import GridCropper from './GridCropper';
 import ImageMasker from './ImageMasker';
 
-type Step = 'upload' | 'preview' | 'grid-edit' | 'mask' | 'solving';
+type Step = 'upload' | 'grid-edit' | 'manual-crop' | 'mask';
 
 const STEP_LABELS: Record<Step, string> = {
   upload: 'Upload',
-  preview: 'Review',
   'grid-edit': 'Grid',
+  'manual-crop': 'Crop',
   mask: 'Mask',
-  solving: 'Solving',
 };
 
 export default function UploadPage() {
   const navigate = useNavigate();
-  const { uploadPhoto, submitGridEdit, submitMask } = useUploadPipeline();
+  const { uploadPhoto, submitGridEdit, submitMask, submitManualCrop } = useUploadPipeline();
 
   const [step, setStep] = useState<Step>('upload');
   const [uploading, setUploading] = useState(false);
   const [submittingGrid, setSubmittingGrid] = useState(false);
   const [submittingMask, setSubmittingMask] = useState(false);
+  const [submittingCrop, setSubmittingCrop] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploadData, setUploadData] = useState<UploadResponse | null>(null);
-  const [maskResult, setMaskResult] = useState<MaskResponse | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [ocrProvider, setOcrProvider] = useState<string>('gemini');
 
-  // SSE for solve progress
-  const sseUrl = step === 'solving' && uploadData
-    ? `/api/${uploadData.session_id}/progress`
-    : null;
-  const { data: progress, done: solveDone } = useSSE(sseUrl);
-
-  // Navigate to puzzle when solve completes
-  if (solveDone && progress?.stage === 'complete' && maskResult?.puzzle_id) {
-    setTimeout(() => navigate(`/puzzle/${maskResult.puzzle_id}`), 800);
-  }
+  useEffect(() => {
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((data) => setOcrProvider(data.ocr_provider ?? 'gemini'))
+      .catch(() => {});
+  }, []);
 
   const handleFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('image/')) {
@@ -51,9 +46,9 @@ export default function UploadPage() {
     try {
       const result = await uploadPhoto(file);
       setUploadData(result);
-      setStep('preview');
-    } catch (err: any) {
-      setError(err.message || 'Upload failed');
+      setStep('grid-edit');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
       setUploading(false);
     }
@@ -71,6 +66,30 @@ export default function UploadPage() {
     if (file) handleFile(file);
   }, [handleFile]);
 
+  const handleMaskSubmit = useCallback(async (data: MaskData) => {
+    if (!uploadData) return;
+    setError(null);
+    setSubmittingMask(true);
+    try {
+      const result = await submitMask(uploadData.session_id, data);
+      if (result.verification_passed && result.puzzle_id) {
+        // Navigate to puzzle immediately — solver runs in background
+        // CrosswordPlayer shows a progress banner while solving
+        navigate(`/puzzle/${result.puzzle_id}`);
+      } else {
+        setError(
+          `Verification failed: ${result.matched_count}/${result.grid_slot_count} slots matched. ` +
+          `OCR found ${result.ocr_clue_count} clues. ` +
+          (result.errors.length > 0 ? result.errors.join('; ') : 'Try adjusting masks and separators.')
+        );
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Mask submission failed');
+    } finally {
+      setSubmittingMask(false);
+    }
+  }, [uploadData, submitMask, navigate]);
+
   const handleGridConfirm = useCallback(async (blackCells: boolean[][]) => {
     if (!uploadData) return;
     setError(null);
@@ -81,38 +100,45 @@ export default function UploadPage() {
         ...prev,
         clue_slot_count: result.clue_slot_count,
       } : prev);
-      setStep('mask');
-    } catch (err: any) {
-      setError(err.message || 'Grid edit failed');
+
+      if (ocrProvider === 'gemini') {
+        // Gemini extracts clues from raw photos — skip masking step
+        await handleMaskSubmit({ rectangles: [], separators: [] });
+      } else {
+        setStep('mask');
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Grid edit failed');
     } finally {
       setSubmittingGrid(false);
     }
-  }, [uploadData, submitGridEdit]);
+  }, [uploadData, submitGridEdit, ocrProvider, handleMaskSubmit]);
 
-  const handleMaskSubmit = useCallback(async (data: MaskData) => {
+  const handleManualCrop = useCallback(async (corners: number[][]) => {
     if (!uploadData) return;
     setError(null);
-    setSubmittingMask(true);
+    setSubmittingCrop(true);
     try {
-      const result = await submitMask(uploadData.session_id, data);
-      setMaskResult(result);
-      if (result.verification_passed) {
-        setStep('solving');
-      } else {
-        setError(
-          `Verification failed: ${result.matched_count}/${result.grid_slot_count} slots matched. ` +
-          `OCR found ${result.ocr_clue_count} clues. ` +
-          (result.errors.length > 0 ? result.errors.join('; ') : 'Try adjusting masks and separators.')
-        );
-      }
-    } catch (err: any) {
-      setError(err.message || 'Mask submission failed');
+      const result = await submitManualCrop(uploadData.session_id, corners);
+      // Cache-bust the warped grid URL so GridEditor refetches both image and grid_data.json
+      setUploadData({
+        ...result,
+        warped_grid_url: `${result.warped_grid_url}?t=${Date.now()}`,
+      });
+      setStep('grid-edit');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Manual crop failed');
     } finally {
-      setSubmittingMask(false);
+      setSubmittingCrop(false);
     }
-  }, [uploadData, submitMask]);
+  }, [uploadData, submitManualCrop]);
 
-  const steps: Step[] = ['upload', 'preview', 'grid-edit', 'mask', 'solving'];
+  const baseSteps: Step[] = ocrProvider === 'gemini'
+    ? ['upload', 'grid-edit']
+    : ['upload', 'grid-edit', 'mask'];
+  const steps: Step[] = step === 'manual-crop'
+    ? ['upload', 'manual-crop', 'grid-edit']
+    : baseSteps;
 
   return (
     <div style={styles.container}>
@@ -167,19 +193,6 @@ export default function UploadPage() {
         </div>
       )}
 
-      {/* Step: Preview */}
-      {step === 'preview' && uploadData && (
-        <GridPreview
-          data={uploadData}
-          onConfirm={() => setStep('grid-edit')}
-          onReupload={() => {
-            setStep('upload');
-            setUploadData(null);
-            setError(null);
-          }}
-        />
-      )}
-
       {/* Step: Grid Editor */}
       {step === 'grid-edit' && uploadData && (
         <GridEditor
@@ -187,8 +200,29 @@ export default function UploadPage() {
           warpedGridUrl={uploadData.warped_grid_url}
           initialSlotCount={uploadData.clue_slot_count}
           onConfirm={handleGridConfirm}
-          onBack={() => setStep('preview')}
+          onBack={() => {
+            setStep('upload');
+            setUploadData(null);
+            setError(null);
+          }}
+          onManualCrop={() => {
+            setError(null);
+            setStep('manual-crop');
+          }}
           submitting={submittingGrid}
+        />
+      )}
+
+      {/* Step: Manual Crop */}
+      {step === 'manual-crop' && uploadData && (
+        <GridCropper
+          imageUrl={uploadData.original_image_url}
+          onSubmit={handleManualCrop}
+          onBack={() => {
+            setError(null);
+            setStep('grid-edit');
+          }}
+          submitting={submittingCrop}
         />
       )}
 
@@ -202,37 +236,6 @@ export default function UploadPage() {
         />
       )}
 
-      {/* Step: Solving */}
-      {step === 'solving' && (
-        <div style={styles.solvingBox}>
-          <h2 style={styles.solvingTitle}>
-            {solveDone && progress?.stage === 'complete'
-              ? 'Puzzle Ready!'
-              : 'Solving Puzzle...'}
-          </h2>
-          {progress && (
-            <>
-              <p style={styles.solvingMessage}>{progress.message}</p>
-              {progress.progress >= 0 && progress.progress <= 1 && (
-                <div style={styles.progressBar}>
-                  <div
-                    style={{
-                      ...styles.progressFill,
-                      width: `${Math.round(progress.progress * 100)}%`,
-                    }}
-                  />
-                </div>
-              )}
-            </>
-          )}
-          {!progress && (
-            <p style={styles.solvingMessage}>Connecting...</p>
-          )}
-          {solveDone && progress?.stage === 'failed' && (
-            <p style={styles.errorText}>Solve failed. You can still view the puzzle with partial results.</p>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -313,38 +316,5 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '6px',
     fontSize: '15px',
     cursor: 'pointer',
-  },
-  solvingBox: {
-    textAlign: 'center' as const,
-    padding: '40px',
-    border: '1px solid #ddd',
-    borderRadius: '12px',
-    width: '100%',
-    maxWidth: '500px',
-  },
-  solvingTitle: {
-    margin: '0 0 12px 0',
-    fontSize: '20px',
-  },
-  solvingMessage: {
-    color: '#666',
-    fontSize: '15px',
-    margin: '0 0 16px 0',
-  },
-  progressBar: {
-    height: '8px',
-    backgroundColor: '#e5e7eb',
-    borderRadius: '4px',
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#2563eb',
-    borderRadius: '4px',
-    transition: 'width 0.3s ease',
-  },
-  errorText: {
-    color: '#b91c1c',
-    fontSize: '14px',
   },
 };

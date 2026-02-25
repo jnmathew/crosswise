@@ -41,6 +41,12 @@ export interface GridEditResponse {
   grid_size: number[];
 }
 
+export interface GridResizeResponse {
+  grid_size: number[];
+  clue_slot_count: number;
+  black_cells: boolean[][];
+}
+
 export interface PuzzleListEntry {
   id: string;
   title: string;

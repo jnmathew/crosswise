@@ -25,20 +25,37 @@ export function usePuzzle(puzzleId: string): UsePuzzleResult {
     setLoading(true);
     setError(null);
 
-    fetch(`/puzzles/${puzzleId}.json`)
-      .then((res) => {
+    let cancelled = false;
+    const maxRetries = 5;
+
+    async function loadPuzzle(attempt: number) {
+      try {
+        const res = await fetch(`/puzzles/${puzzleId}.json`);
         if (!res.ok) throw new Error(`Failed to load puzzle: ${res.status}`);
-        return res.json();
-      })
-      .then((data: PuzzleData) => {
-        setPuzzle(data);
-        setCrosswordData(transformPuzzle(data));
-        setLoading(false);
-      })
-      .catch((err) => {
-        setError(err.message);
-        setLoading(false);
-      });
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('json')) {
+          // Vite may return index.html for newly created files
+          throw new Error('Puzzle not ready yet');
+        }
+        const data: PuzzleData = await res.json();
+        if (!cancelled) {
+          setPuzzle(data);
+          setCrosswordData(transformPuzzle(data));
+          setLoading(false);
+        }
+      } catch (err: unknown) {
+        if (cancelled) return;
+        if (attempt < maxRetries) {
+          setTimeout(() => loadPuzzle(attempt + 1), 1000);
+        } else {
+          setError(err instanceof Error ? err.message : 'Failed to load puzzle');
+          setLoading(false);
+        }
+      }
+    }
+
+    loadPuzzle(0);
+    return () => { cancelled = true; };
   }, [puzzleId, fetchKey]);
 
   return { puzzle, crosswordData, loading, error, refetch };

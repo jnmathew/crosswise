@@ -1,5 +1,4 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
-import type { GridEditResponse } from '../types/api';
 
 interface GridCell {
   row: number;
@@ -20,10 +19,13 @@ interface GridEditorProps {
   initialSlotCount: number;
   onConfirm: (blackCells: boolean[][]) => void;
   onBack: () => void;
+  onManualCrop?: () => void;
   submitting: boolean;
 }
 
 const CANVAS_SIZE = 560;
+const MIN_DIM = 3;
+const MAX_DIM = 30;
 
 export default function GridEditor({
   sessionId,
@@ -31,6 +33,7 @@ export default function GridEditor({
   initialSlotCount,
   onConfirm,
   onBack,
+  onManualCrop,
   submitting,
 }: GridEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -39,11 +42,15 @@ export default function GridEditor({
   const [blackCells, setBlackCells] = useState<boolean[][] | null>(null);
   const [slotCount, setSlotCount] = useState(initialSlotCount);
   const [loading, setLoading] = useState(true);
+  const [resizing, setResizing] = useState(false);
 
   // Fetch grid data on mount
   useEffect(() => {
-    fetch(`/api/files/${sessionId}/grid_data.json`)
-      .then((res) => res.json())
+    fetch(`/api/files/${sessionId}/grid_data.json?t=${Date.now()}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data: GridData) => {
         setGridData(data);
         const cells = data.cells.map((row) => row.map((c) => c.is_block));
@@ -51,7 +58,7 @@ export default function GridEditor({
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [sessionId]);
+  }, [sessionId, warpedGridUrl]);
 
   // Load warped grid image
   useEffect(() => {
@@ -134,6 +141,34 @@ export default function GridEditor({
     }
   };
 
+  const handleResize = async (newRows: number, newCols: number) => {
+    if (newRows < MIN_DIM || newRows > MAX_DIM || newCols < MIN_DIM || newCols > MAX_DIM) return;
+    setResizing(true);
+    try {
+      const res = await fetch(`/api/${sessionId}/resize-grid`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: newRows, cols: newCols }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        console.error('Resize failed:', err.detail || res.statusText);
+        return;
+      }
+      const data = await res.json();
+      setGridData({ rows: newRows, cols: newCols, cells: [] });
+      setBlackCells(data.black_cells);
+      setSlotCount(data.clue_slot_count);
+      // Update gridData with full cell info from black_cells
+      const cells: GridCell[][] = data.black_cells.map((row: boolean[], r: number) =>
+        row.map((is_block: boolean, c: number) => ({ row: r, col: c, is_block, clue_number: null }))
+      );
+      setGridData({ rows: newRows, cols: newCols, cells });
+    } finally {
+      setResizing(false);
+    }
+  };
+
   const handleConfirm = () => {
     if (blackCells) {
       onConfirm(blackCells);
@@ -151,8 +186,46 @@ export default function GridEditor({
     <div style={styles.container}>
       <h2 style={styles.title}>Verify Black Cells</h2>
       <p style={styles.subtitle}>
-        Click cells to toggle black/white. Red cells marked "B" are classified as black.
+        Click cells to toggle black/white. Use +/- to adjust grid dimensions.
       </p>
+
+      <div style={styles.dimControls}>
+        <div style={styles.dimGroup}>
+          <button
+            style={styles.dimButton}
+            onClick={() => handleResize(gridData.rows - 1, gridData.cols)}
+            disabled={resizing || gridData.rows <= MIN_DIM}
+          >
+            &minus;
+          </button>
+          <span style={styles.dimLabel}>{gridData.rows} rows</span>
+          <button
+            style={styles.dimButton}
+            onClick={() => handleResize(gridData.rows + 1, gridData.cols)}
+            disabled={resizing || gridData.rows >= MAX_DIM}
+          >
+            +
+          </button>
+        </div>
+        <div style={styles.dimGroup}>
+          <button
+            style={styles.dimButton}
+            onClick={() => handleResize(gridData.rows, gridData.cols - 1)}
+            disabled={resizing || gridData.cols <= MIN_DIM}
+          >
+            &minus;
+          </button>
+          <span style={styles.dimLabel}>{gridData.cols} cols</span>
+          <button
+            style={styles.dimButton}
+            onClick={() => handleResize(gridData.rows, gridData.cols + 1)}
+            disabled={resizing || gridData.cols >= MAX_DIM}
+          >
+            +
+          </button>
+        </div>
+        {resizing && <span style={styles.resizingLabel}>Resizing...</span>}
+      </div>
 
       <div style={styles.stats}>
         <span>{gridData.rows} &times; {gridData.cols} grid</span>
@@ -170,12 +243,17 @@ export default function GridEditor({
 
       <div style={styles.actions}>
         <button style={styles.secondaryButton} onClick={onBack}>
-          &larr; Back
+          &larr; Re-upload
         </button>
+        {onManualCrop && (
+          <button style={styles.cropButton} onClick={onManualCrop}>
+            Select grid manually
+          </button>
+        )}
         <button
           style={styles.primaryButton}
           onClick={handleConfirm}
-          disabled={submitting}
+          disabled={submitting || resizing}
         >
           {submitting ? 'Saving...' : 'Confirm Grid'}
         </button>
@@ -202,6 +280,39 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#666',
     maxWidth: '500px',
     textAlign: 'center' as const,
+  },
+  dimControls: {
+    display: 'flex',
+    gap: '24px',
+    alignItems: 'center',
+  },
+  dimGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  dimButton: {
+    width: '32px',
+    height: '32px',
+    border: '1px solid #ccc',
+    borderRadius: '6px',
+    backgroundColor: '#fff',
+    fontSize: '18px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dimLabel: {
+    fontSize: '15px',
+    fontWeight: 600,
+    minWidth: '60px',
+    textAlign: 'center' as const,
+  },
+  resizingLabel: {
+    fontSize: '13px',
+    color: '#888',
+    fontStyle: 'italic',
   },
   stats: {
     display: 'flex',
@@ -239,6 +350,15 @@ const styles: Record<string, React.CSSProperties> = {
     backgroundColor: '#fff',
     color: '#555',
     border: '1px solid #ccc',
+    borderRadius: '6px',
+    fontSize: '15px',
+    cursor: 'pointer',
+  },
+  cropButton: {
+    padding: '10px 24px',
+    backgroundColor: '#fff',
+    color: '#b45309',
+    border: '1px solid #fbbf24',
     borderRadius: '6px',
     fontSize: '15px',
     cursor: 'pointer',
