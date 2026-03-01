@@ -152,10 +152,11 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 - `generate_candidates_with_database()` - Database lookup with Claude Opus fallback
 - `generate_with_claude()` - Claude Opus candidate generation
 - `regenerate_with_patterns()` - Pattern-based refinement from crossing letters
-- `bouncer_filter()` - Score candidates by DB/word-index verification (0.3–1.0)
+- `bouncer_filter()` - Score candidates by DB/word-index verification (0.3–1.0), +0.1 web confirmation bonus
 - `ensure_minimum_candidates()` - Guarantee >= 5 candidates per clue
 - `sniper_escalation()` - Multi-level escalation ladder when domain hits zero (Sonnet → Opus → word index + ranking)
 - `generate_with_extended_thinking()` - Claude Sonnet 4.5 with thinking enabled for hard/wordplay clues
+- `web_search_prepass()` - Haiku web search for pop culture clues (quotes, proper nouns, media refs) in parallel
 
 **csp.py** - Constraint satisfaction solver:
 - MAC (Maintaining Arc Consistency) with `mac_mode="search-only"` (skip AC-3 preprocessing)
@@ -165,11 +166,17 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 
 **llm_solver.py** - LLM-based iterative solver (primary solver):
 - Multi-pass architecture: commit high-confidence answers first, propagate crossing letters
-- Anthropic `web_search_20250305` server-side tool for proper noun / factual verification
+- `solve_pass()` — single-turn Opus call (no web search, no multi-turn continuation)
 - `find_conflict_clusters()` — detects dead-end patterns (crossing letters match no valid word), traces blame to wrong committed answers, groups into connected clusters
-- `resolve_conflict_cluster()` — removes blamed answers from grid, asks LLM to re-solve the cluster jointly with web search available
+- `resolve_conflict_cluster()` — removes blamed answers from grid, asks LLM to re-solve the cluster jointly with web search available (Anthropic `web_search_20250305`)
+- `propagate_constraints()` — zero-cost logic: auto-commits clues where crossing patterns eliminate all but one candidate; handles fully-constrained patterns via word index + dictionary API + Haiku verification
 - Post-resolution follow-up pass picks up newly-unblocked clues after conflict resolution frees crossing letters
-- Handles `pause_turn` stop reason for server-side search continuation loops
+
+**cost_tracker.py** - API cost tracking:
+- Thread-safe `CostTracker` accumulates costs across all API calls during a solve
+- Tracks input/output tokens, cache write (1.25x) and read (0.1x) tokens, web search ($0.01/query)
+- Pricing: Opus 4 ($15/$75), Sonnet 4 ($3/$15), Haiku 4.5 ($1/$5) per MTok
+- Per-call logging and phase-grouped summary at end of solve
 
 **generate_hints.py** - AI hint generation:
 - Batch hint + explanation generation using Claude
@@ -177,14 +184,17 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 
 **Solving Strategy** (LLM solver — default):
 1. Database lookup finds ~70% of clues from ~9-11M historical pairs (xd + CrosswordQA)
-2. Claude Opus fallback generates candidates for remaining clues
-3. Bouncer filter scores all candidates by DB/word-index verification
-4. LLM iterative solve: 6 passes of commit → propagate crossing letters → re-solve
-5. Web search verification for proper nouns and ambiguous factual clues (~$0.01/search)
-6. Conflict resolution: detect dead-end patterns → trace blamed crossings → LLM re-solves clusters
-7. Post-resolution pass to fill newly-unblocked clues
-8. CSP cleanup for any remaining unsolved clues
-9. Hint generation runs in parallel after solve
+2. Haiku web search pre-pass for pop culture clues (~$0.01-0.03/clue)
+3. Claude Opus fallback generates candidates for remaining clues
+4. Bouncer filter scores all candidates by DB/word-index verification (+0.1 web confirmation bonus)
+5. LLM iterative solve: 6 single-turn Opus passes of commit → propagate crossing letters → re-solve
+6. Constraint propagation: auto-commit clues where crossing patterns leave one candidate (zero API cost)
+7. Conflict resolution: detect dead-end patterns → trace blamed crossings → LLM re-solves clusters (with web search)
+8. Post-resolution constraint propagation + follow-up pass
+9. Fully-constrained pattern handling: dictionary API + Haiku verification for words not in candidate list
+10. CSP cleanup for any remaining unsolved clues
+11. Hint generation runs in parallel after solve
+- **Cost**: ~$1.20/puzzle (down from $5.85), 69/69 solve rate
 
 **Solving Strategy** (CSP solver — legacy):
 1. Database lookup finds ~70% of clues
@@ -218,9 +228,9 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 ### React Frontend (`web/`)
 
 **Components:**
-- `CrosswordPlayer.tsx` — Main player with react-crossword, auto-scroll via CrosswordContext, editable name, togglable correct counter, photo reference modal (original + masked tabs), Check Word, background solve banner with SSE
+- `CrosswordPlayer.tsx` — Main player with react-crossword, auto-scroll via CrosswordContext, editable name, togglable correct counter, photo reference modal (original + masked tabs), Check Word, background solve banner with SSE, checks session status API for re-solve SSE connection
 - `HintPanel.tsx` — Progressive hint reveal (hint → explanation → answer), Check Word button
-- `PuzzleSelector.tsx` — Dynamic puzzle list from `/api/puzzles`
+- `PuzzleSelector.tsx` — Dynamic puzzle list from `/api/puzzles`, re-solve button for partially-solved puzzles
 - `UploadPage.tsx` — Multi-step wizard (upload → preview → grid edit → mask → solve)
 - `ImageMasker.tsx` — Canvas mask/separator tool with help overlay and example image
 - `GridEditor.tsx` — Toggle black cells to fix grid detection errors
