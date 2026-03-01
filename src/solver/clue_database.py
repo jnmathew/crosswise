@@ -2,7 +2,7 @@
 SQLite-backed clue database for crossword puzzle solving.
 
 Loads clue/answer pairs from two sources:
-- xd TSV (data/xd 2/clues.tsv) — ~7.5M historical pairs
+- xd TSV (data/xd/clues.tsv) — ~7.5M historical pairs
 - CrosswordQA CSVs (data/crosswordqa/) — ~6.8M pairs from HuggingFace
 
 Deduplicates CrosswordQA against xd on (answer, clue_normalized) pairs.
@@ -21,7 +21,7 @@ from loguru import logger
 
 
 # Default paths
-DEFAULT_XD_TSV_PATH = "data/xd 2/clues.tsv"
+DEFAULT_XD_TSV_PATH = "data/xd/clues.tsv"
 DEFAULT_CQA_DIR = "data/crosswordqa"
 DEFAULT_DB_PATH = "data/clues.db"
 
@@ -115,7 +115,7 @@ class ClueDatabase:
                 "No clue data sources found.\n"
                 f"  xd TSV:        {xd_path} (not found)\n"
                 f"  CrosswordQA:   {cqa_dir}/ (not found)\n"
-                "Run: bash scripts/download_crosswordqa.sh"
+                "Run: bash scripts/setup_data.sh"
             )
 
         logger.info("Building SQLite clue database...")
@@ -138,12 +138,11 @@ class ClueDatabase:
         """Build SQLite database from available data sources."""
         self._conn = sqlite3.connect(str(self.db_path))
 
-        # Create table (no pubid/year — never queried)
+        # Create table (no pubid/year/raw clue — never queried)
         self._conn.execute("""
             CREATE TABLE clues (
                 id INTEGER PRIMARY KEY,
                 answer TEXT NOT NULL,
-                clue TEXT NOT NULL,
                 clue_normalized TEXT NOT NULL,
                 length INTEGER NOT NULL
             )
@@ -218,12 +217,12 @@ class ClueDatabase:
                 # Normalize clue for fuzzy matching
                 clue_normalized = normalize_clue_text(clue)
 
-                batch.append((answer, clue, clue_normalized, len(answer)))
+                batch.append((answer, clue_normalized, len(answer)))
 
                 if len(batch) >= batch_size:
                     self._conn.executemany(
-                        "INSERT INTO clues (answer, clue, clue_normalized, length) "
-                        "VALUES (?, ?, ?, ?)",
+                        "INSERT INTO clues (answer, clue_normalized, length) "
+                        "VALUES (?, ?, ?)",
                         batch
                     )
                     total_inserted += len(batch)
@@ -234,8 +233,8 @@ class ClueDatabase:
         # Insert remaining
         if batch:
             self._conn.executemany(
-                "INSERT INTO clues (answer, clue, clue_normalized, length) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO clues (answer, clue_normalized, length) "
+                "VALUES (?, ?, ?)",
                 batch
             )
             total_inserted += len(batch)
@@ -302,12 +301,12 @@ class ClueDatabase:
                     # Add to dedup set so we don't insert CQA duplicates either
                     dedup.add(pair)
 
-                    batch.append((answer, clue, clue_normalized, len(answer)))
+                    batch.append((answer, clue_normalized, len(answer)))
 
                     if len(batch) >= batch_size:
                         self._conn.executemany(
-                            "INSERT INTO clues (answer, clue, clue_normalized, length) "
-                            "VALUES (?, ?, ?, ?)",
+                            "INSERT INTO clues (answer, clue_normalized, length) "
+                            "VALUES (?, ?, ?)",
                             batch
                         )
                         total_inserted += len(batch)
@@ -318,8 +317,8 @@ class ClueDatabase:
         # Insert remaining
         if batch:
             self._conn.executemany(
-                "INSERT INTO clues (answer, clue, clue_normalized, length) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO clues (answer, clue_normalized, length) "
+                "VALUES (?, ?, ?)",
                 batch
             )
             total_inserted += len(batch)
