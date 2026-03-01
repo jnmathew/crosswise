@@ -501,6 +501,153 @@ def _matches_pattern(word: str, pattern: str) -> bool:
     return True
 
 
+def _is_pop_culture_clue(text: str) -> bool:
+    """Heuristic: does this clue broadly reference pop culture or proper nouns?
+
+    These are the clues where web search adds the most value — song titles,
+    movie/TV names, celebrity references, book titles, brand names, etc.
+    """
+    t = text.strip()
+    t_lower = t.lower()
+
+    # Contains quoted text (e.g., '"— — Love Her"')
+    if '"' in t or '\u201c' in t or '\u201d' in t:
+        return True
+
+    # Fill-in-the-blank with proper-noun context: has em-dash "—" and a capitalized word
+    if '\u2014' in t or '—' in t or '---' in t:
+        # Check for a capitalized word (not just the first word)
+        words = t.split()
+        for w in words:
+            cleaned = w.strip('",.\u2014—\'')
+            if cleaned and cleaned[0].isupper() and len(cleaned) > 1 and cleaned not in ('The', 'A', 'An', 'Or', 'And', 'In', 'On', 'Of', 'For', 'To', 'Is', 'It', 'At', 'By'):
+                return True
+
+    # References to media / entertainment
+    media_signals = [
+        'singer', 'actress', 'actor', 'director', 'author', 'novelist',
+        'film', 'movie', 'show', 'series', 'song', 'album', 'band',
+        'novel', 'book', 'play', 'musical', 'tv', 'cartoon', 'comic',
+        'brand', 'company', 'network', 'channel', 'magazine',
+        "beatles'", "beatles", 'grammy', 'oscar', 'emmy', 'tony',
+        'broadway', 'hollywood', 'disney', 'marvel', 'netflix',
+    ]
+    for signal in media_signals:
+        if signal in t_lower:
+            return True
+
+    # Contains a proper noun mid-clue (capitalized word that isn't the first word)
+    words = t.split()
+    if len(words) >= 3:
+        for w in words[1:]:
+            cleaned = w.strip('",.\u2014—\'?!;:')
+            if cleaned and cleaned[0].isupper() and len(cleaned) > 1 and cleaned not in ('The', 'A', 'An', 'Or', 'And', 'In', 'On', 'Of', 'For', 'To', 'Is', 'It', 'At', 'By', 'No', 'Not', 'So'):
+                return True
+
+    return False
+
+
+def web_search_prepass(
+    clues: List[ClueInput],
+) -> Dict[str, str]:
+    """Run pop-culture clues through Haiku with web search to get verified candidates.
+
+    Filters clues to those broadly referencing pop culture (proper nouns, media,
+    fill-in-the-blank with names), then fires individual Haiku calls in parallel.
+    Each call has web_search available (max_uses=1); Haiku decides whether to search.
+
+    Args:
+        clues: All clue inputs for the puzzle.
+
+    Returns:
+        Dict mapping clue_id to a single web-verified candidate answer (uppercase).
+    """
+    from src.solver.cost_tracker import get_tracker
+
+    pop_clues = [c for c in clues if _is_pop_culture_clue(c.text)]
+    if not pop_clues:
+        print("  Web pre-pass: no pop culture clues detected")
+        return {}
+
+    print(f"  Web pre-pass: {len(pop_clues)}/{len(clues)} clues identified as pop culture")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("  Warning: ANTHROPIC_API_KEY not set, skipping web pre-pass")
+        return {}
+
+    import anthropic
+
+    results: Dict[str, str] = {}
+    tracker = get_tracker()
+
+    def _search_one(clue: ClueInput) -> Optional[tuple]:
+        """Search for one clue. Returns (clue_id, answer) or None."""
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+
+            prompt = (
+                f'Crossword clue: "{clue.text}" ({clue.length} letters)\n\n'
+                f'What is the answer? If you are unsure, use web search to verify. '
+                f'Reply with ONLY the answer in uppercase, nothing else.'
+            )
+
+            tools = [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 1,
+            }]
+
+            messages = [{"role": "user", "content": prompt}]
+
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=100,
+                messages=messages,
+                tools=tools,
+            )
+            tracker.track(response, f"web_prepass", model="claude-haiku-4-5-20251001")
+
+            # Handle pause_turn (1 continuation max for search results)
+            if response.stop_reason == "pause_turn":
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": "Reply with ONLY the answer in uppercase."})
+                response = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=100,
+                    messages=messages,
+                    tools=tools,
+                )
+                tracker.track(response, f"web_prepass_cont", model="claude-haiku-4-5-20251001")
+
+            # Extract answer from response
+            text_parts = [b.text for b in response.content if hasattr(b, "text")]
+            answer = "".join(text_parts).strip().upper()
+            # Clean up — remove quotes, periods, extra whitespace
+            answer = answer.strip('"\'.,!? ').replace(" ", "")
+
+            if len(answer) == clue.length and answer.isalpha():
+                return (clue.clue_id, answer)
+            return None
+
+        except Exception as e:
+            # Silently skip failures (rate limits, network errors)
+            return None
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_search_one, c): c for c in pop_clues}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                results[result[0]] = result[1]
+
+    found = len(results)
+    print(f"  Web pre-pass: {found}/{len(pop_clues)} clues got web-verified candidates")
+    return results
+
+
 def categorize_clue(text: str) -> str:
     """
     Heuristic clue categorization.
@@ -560,6 +707,7 @@ def bouncer_filter(
     word_index: Optional[Any] = None,
     clue_text_lookup: Optional[Dict[str, str]] = None,
     candidate_sources: Optional[Dict[str, Dict[str, str]]] = None,
+    web_candidates: Optional[Dict[str, str]] = None,
 ) -> Dict[str, List["ScoredCandidate"]]:
     """
     Cross-reference LLM candidates against DB and word index (Bouncer Filter).
@@ -568,6 +716,7 @@ def bouncer_filter(
     - Source: DB-verified (0.8), word-index-verified (0.6), unverified (0.3)
     - Broda bonus: up to +0.15 from word index quality score
     - Clue-text match bonus: +0.1 if candidate was seen as answer to this clue in DB
+    - Web confirmation bonus: +0.1 if candidate matches Haiku web pre-pass result
 
     Candidates sorted by composite score (highest first).
 
@@ -577,6 +726,7 @@ def bouncer_filter(
         word_index: WordIndex for membership testing and Broda scores
         clue_text_lookup: Optional dict of clue_id -> clue text (for DB clue match bonus)
         candidate_sources: Optional dict of clue_id -> {word -> source_label} for accurate source tracking
+        web_candidates: Optional dict of clue_id -> web-verified answer from Haiku pre-pass
 
     Returns:
         Dict mapping clue_id to list of ScoredCandidate, sorted by score.
@@ -632,7 +782,13 @@ def bouncer_filter(
             # Clue-text match bonus
             clue_bonus = 0.1 if is_clue_match else 0.0
 
-            confidence = min(base_score + broda_bonus + clue_bonus, 1.0)
+            # Web confirmation bonus: candidate matches Haiku web pre-pass result
+            web_bonus = 0.0
+            if web_candidates and clue_id in web_candidates:
+                if word_upper == web_candidates[clue_id]:
+                    web_bonus = 0.1
+
+            confidence = min(base_score + broda_bonus + clue_bonus + web_bonus, 1.0)
             verified = is_in_db or is_in_index
 
             # Use tracked source if available, otherwise infer from verification
@@ -917,11 +1073,15 @@ Respond with ONLY a JSON object mapping clue_id to an array of answers.
 Example: {{"1-across": ["PARIS", "LYONS"], "2-down": ["ECHO", "ARIA"]}}"""
 
         try:
+            from src.solver.cost_tracker import get_tracker
+
             response = client.messages.create(
                 model=model,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}]
             )
+            short = "opus" if "opus" in model else "sonnet" if "sonnet" in model else model
+            get_tracker().track(response, f"candidates_{short}")
 
             response_text = response.content[0].text
             clue_ids = [c.clue_id for c in batch]
