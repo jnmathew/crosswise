@@ -63,12 +63,15 @@ Clues:
 
 Respond with ONLY the JSON array, no other text."""
 
+    from src.solver.cost_tracker import get_tracker
+
     client = anthropic.Anthropic()
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
+    get_tracker().track(response, "hints")
 
     text = response.content[0].text.strip()
     # Strip markdown fences if present
