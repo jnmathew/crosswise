@@ -113,6 +113,7 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 
 ## Development Notes
 
+- **Git history was scrubbed** with `git filter-repo` to remove ~53MB of binary images (v1 debug PNGs, cell crops, example JPGs). `.git/` went from 49MB → 608K. A pre-filter backup exists locally outside the repo.
 - Image processing uses grayscale conversion with careful handling of both color and grayscale inputs
 - Fallback strategies implemented (adaptive → Otsu thresholding) when component detection fails
 - Aqua/cyan (BGR: 255, 255, 0) used for separator lines — visible over white masks and gray newspaper
