@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import type { PuzzleListEntry } from '../types/api';
 
 export default function PuzzleSelector() {
   const [puzzles, setPuzzles] = useState<PuzzleListEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [solvingId, setSolvingId] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     fetch('/api/puzzles')
@@ -15,6 +17,25 @@ export default function PuzzleSelector() {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  const handleResolve = async (e: React.MouseEvent, puzzleId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setSolvingId(puzzleId);
+    try {
+      const res = await fetch(`/api/${puzzleId}/solve`, { method: 'POST' });
+      if (res.ok) {
+        navigate(`/puzzle/${puzzleId}`);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.detail || 'Failed to start solve');
+        setSolvingId(null);
+      }
+    } catch {
+      alert('Failed to start solve');
+      setSolvingId(null);
+    }
+  };
 
   return (
     <div style={styles.container}>
@@ -42,7 +63,18 @@ export default function PuzzleSelector() {
                 {p.solved}/{p.totalClues} solved
               </span>
             </div>
-            <div style={styles.id}>{p.id}</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={styles.id}>{p.id}</div>
+              {p.solved < p.totalClues && (
+                <button
+                  style={styles.resolveBtn}
+                  onClick={(e) => handleResolve(e, p.id)}
+                  disabled={solvingId === p.id}
+                >
+                  {solvingId === p.id ? 'Starting...' : 'Re-solve'}
+                </button>
+              )}
+            </div>
           </Link>
         ))}
       </div>
@@ -125,5 +157,14 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#999',
     fontSize: '15px',
     marginTop: '24px',
+  },
+  resolveBtn: {
+    padding: '4px 12px',
+    fontSize: '12px',
+    backgroundColor: '#f59e0b',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
   },
 };

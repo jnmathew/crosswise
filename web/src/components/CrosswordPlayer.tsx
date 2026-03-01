@@ -88,15 +88,19 @@ export default function CrosswordPlayer() {
 
   const puzzleName = nameOverride ?? (puzzle?.metadata.name || puzzleId.replace('IMG_', 'Puzzle #'));
 
-  // Check if puzzle is still being solved (has unsolved clues)
-  const isSolving = useMemo(() => {
-    if (!puzzle) return false;
-    const allClues = [...puzzle.clues.across, ...puzzle.clues.down];
-    const hasAnyAnswer = allClues.some((c) => c.answer !== null && !c.answer.includes('?'));
-    const allSolved = allClues.every((c) => c.answer !== null && !c.answer.includes('?'));
-    // If no clue has an answer, a solve is likely in progress
-    return !hasAnyAnswer && !allSolved;
-  }, [puzzle]);
+  // Check if a solve is in progress by polling session status
+  const [isSolving, setIsSolving] = useState(false);
+  useEffect(() => {
+    if (!puzzleId) return;
+    fetch(`/api/${puzzleId}/status`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data && (data.status === 'solving' || data.status === 'generating_hints')) {
+          setIsSolving(true);
+        }
+      })
+      .catch(() => {});
+  }, [puzzleId]);
 
   // Connect SSE when puzzle is being solved
   const sseUrl = isSolving ? `/api/${puzzleId}/progress` : null;
@@ -111,11 +115,13 @@ export default function CrosswordPlayer() {
   // Refetch puzzle when solve completes
   useEffect(() => {
     if (solveDone && progress?.stage === 'complete') {
+      setIsSolving(false);
       refetch();
       const timer = showToast('Puzzle solved! Hints are now available.');
       return () => clearTimeout(timer);
     }
     if (solveDone && progress?.stage === 'failed') {
+      setIsSolving(false);
       refetch();
       const timer = showToast('Solve finished with partial results.');
       return () => clearTimeout(timer);
@@ -223,6 +229,11 @@ export default function CrosswordPlayer() {
     }
     setUserCorrectCount(correct);
   }, [puzzle]);
+
+  // Recompute when puzzle data changes (e.g. solver completes, answers now available)
+  useEffect(() => {
+    recomputeCorrectCount();
+  }, [recomputeCorrectCount]);
 
   const handleCellChange = useCallback((row: number, col: number, char: string) => {
     const key = `${row},${col}`;

@@ -22,7 +22,10 @@ export function usePuzzle(puzzleId: string): UsePuzzleResult {
   }, []);
 
   useEffect(() => {
-    setLoading(true);
+    const isRefetch = fetchKey > 0;
+    if (!isRefetch) {
+      setLoading(true);
+    }
     setError(null);
 
     let cancelled = false;
@@ -40,7 +43,12 @@ export function usePuzzle(puzzleId: string): UsePuzzleResult {
         const data: PuzzleData = await res.json();
         if (!cancelled) {
           setPuzzle(data);
-          setCrosswordData(transformPuzzle(data));
+          // Only update crosswordData on initial load. On refetch (solver
+          // completed), changing the data prop causes react-crossword to
+          // re-initialize the grid, which wipes the user's entered letters.
+          if (!isRefetch) {
+            setCrosswordData(transformPuzzle(data));
+          }
           setLoading(false);
         }
       } catch (err: unknown) {
