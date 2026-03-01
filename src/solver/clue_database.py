@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import List, Optional, Set, Tuple
 import unicodedata
 
+from loguru import logger
+
 
 # Default paths
 DEFAULT_XD_TSV_PATH = "data/xd 2/clues.tsv"
@@ -95,7 +97,7 @@ class ClueDatabase:
             cursor = self._conn.execute("SELECT COUNT(*) FROM clues")
             count = cursor.fetchone()[0]
             if count > 0:
-                print(f"Loaded clue database: {count:,} entries")
+                logger.info(f"Loaded clue database: {count:,} entries")
                 return
             # Empty database, need to rebuild
             self._conn.close()
@@ -116,7 +118,7 @@ class ClueDatabase:
                 "Run: bash scripts/download_crosswordqa.sh"
             )
 
-        print("Building SQLite clue database...")
+        logger.info("Building SQLite clue database...")
         self._build_database(
             xd_path if has_xd else None,
             cqa_dir if has_cqa else None,
@@ -156,28 +158,28 @@ class ClueDatabase:
             # Build dedup set from xd data already loaded
             dedup: Set[Tuple[str, str]] = set()
             if xd_count > 0:
-                print("  Building dedup index from xd data...")
+                logger.info("Building dedup index from xd data...")
                 cursor = self._conn.execute(
                     "SELECT DISTINCT answer, clue_normalized FROM clues"
                 )
                 for row in cursor:
                     dedup.add((row[0], row[1]))
-                print(f"  Dedup index: {len(dedup):,} unique (answer, clue) pairs")
+                logger.info(f"Dedup index: {len(dedup):,} unique (answer, clue) pairs")
 
             cqa_count = self._load_crosswordqa(cqa_dir, dedup)
 
         total = xd_count + cqa_count
-        print(f"  Total: {total:,} clue/answer pairs")
+        logger.info(f"Total: {total:,} clue/answer pairs")
 
         # Create indexes
-        print("  Creating indexes...")
+        logger.info("Creating indexes...")
         self._conn.execute("CREATE INDEX idx_clue_normalized ON clues(clue_normalized)")
         self._conn.execute("CREATE INDEX idx_length ON clues(length)")
         self._conn.execute("CREATE INDEX idx_answer ON clues(answer)")
         self._conn.execute("CREATE INDEX idx_clue_length ON clues(clue_normalized, length)")
 
         self._conn.commit()
-        print(f"Database saved to {self.db_path}")
+        logger.info(f"Database saved to {self.db_path}")
 
     def _load_xd_tsv(self, path: Path) -> int:
         """Load clue/answer pairs from xd TSV file.
@@ -185,7 +187,7 @@ class ClueDatabase:
         Returns:
             Number of rows inserted.
         """
-        print(f"  Loading xd TSV from {path}...")
+        logger.info(f"Loading xd TSV from {path}...")
 
         batch_size = 10000
         batch = []
@@ -226,7 +228,7 @@ class ClueDatabase:
                     )
                     total_inserted += len(batch)
                     if total_inserted % 500000 == 0:
-                        print(f"    {total_inserted:,} rows...")
+                        logger.debug(f"{total_inserted:,} rows...")
                     batch = []
 
         # Insert remaining
@@ -238,7 +240,7 @@ class ClueDatabase:
             )
             total_inserted += len(batch)
 
-        print(f"  xd: {total_inserted:,} rows loaded")
+        logger.info(f"xd: {total_inserted:,} rows loaded")
         return total_inserted
 
     def _load_crosswordqa(
@@ -255,7 +257,7 @@ class ClueDatabase:
         Returns:
             Number of new rows inserted.
         """
-        print(f"  Loading CrosswordQA from {cqa_dir}/...")
+        logger.info(f"Loading CrosswordQA from {cqa_dir}/...")
 
         batch_size = 10000
         batch = []
@@ -266,7 +268,7 @@ class ClueDatabase:
         for csv_name in ("train.csv", "valid.csv"):
             csv_path = cqa_dir / csv_name
             if not csv_path.exists():
-                print(f"    {csv_name} not found, skipping")
+                logger.warning(f"{csv_name} not found, skipping")
                 continue
 
             with open(csv_path, 'r', encoding='utf-8') as f:
@@ -310,7 +312,7 @@ class ClueDatabase:
                         )
                         total_inserted += len(batch)
                         if total_inserted % 500000 == 0:
-                            print(f"    {total_inserted:,} rows...")
+                            logger.debug(f"{total_inserted:,} rows...")
                         batch = []
 
         # Insert remaining
@@ -322,8 +324,8 @@ class ClueDatabase:
             )
             total_inserted += len(batch)
 
-        print(f"  CrosswordQA: {total_inserted:,} new rows "
-              f"({skipped_dup:,} duplicates, {skipped_invalid:,} invalid skipped)")
+        logger.info(f"CrosswordQA: {total_inserted:,} new rows "
+                    f"({skipped_dup:,} duplicates, {skipped_invalid:,} invalid skipped)")
         return total_inserted
 
     def lookup_by_clue(

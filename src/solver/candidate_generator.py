@@ -1,19 +1,20 @@
 """
-LLM-based candidate generation for crossword clues using OpenAI API.
+Candidate generation for crossword clues.
 
-Also supports TSV/SQLite database lookup as primary candidate source,
-with LLM generation as fallback. Uses o1 for wordplay/pun clues.
-
-Supports structured outputs to guarantee exactly N candidates of length M.
+Primary source: TSV/SQLite database lookup (~9-11M historical pairs).
+LLM fallback: Claude Opus for batch generation, Sonnet with extended thinking
+for wordplay clues. Legacy OpenAI functions retained but not used in main pipeline.
 """
 
 import os
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, TYPE_CHECKING, Any
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+from loguru import logger
 from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -224,7 +225,7 @@ Provide exactly {candidates_per_clue} valid candidates for each clue."""
         return result
 
     except Exception as e:
-        print(f"  Warning: Structured output error: {e}")
+        logger.warning(f"Structured output error: {e}")
         # Fall back to regular generation
         return generate_candidates_batch(clues, candidates_per_clue, api_key, model)
 
@@ -235,9 +236,9 @@ def generate_with_o1(
     api_key: Optional[str] = None,
 ) -> Dict[str, List[str]]:
     """
-    Generate candidates for difficult/wordplay clues using GPT-5.
+    Generate candidates for difficult/wordplay clues using OpenAI o1.
 
-    Uses gpt-5 with structured outputs for reliable JSON responses.
+    Legacy function — main pipeline uses generate_with_extended_thinking() instead.
     Focuses on wordplay, puns, and creative interpretations.
 
     Args:
@@ -325,10 +326,10 @@ Respond with ONLY a JSON array of {candidates_per_clue} answers, like: ["ANSWER1
 
             if filtered:
                 all_candidates[clue.clue_id] = filtered
-                print(f"    {clue.clue_id}: {filtered}")
+                logger.debug(f"{clue.clue_id}: {filtered}")
 
         except Exception as e:
-            print(f"    Warning: Wordplay generation error for {clue.clue_id}: {e}")
+            logger.warning(f"Wordplay generation error for {clue.clue_id}: {e}")
 
     return all_candidates
 
@@ -390,10 +391,10 @@ def _parse_response(response_text: str, clue_ids: List[str]) -> Dict[str, List[s
                 result = json.loads(text[start:end])
             except json.JSONDecodeError:
                 # Return empty results instead of failing
-                print(f"  Warning: Could not parse LLM response, skipping batch")
+                logger.warning("Could not parse LLM response, skipping batch")
                 return {clue_id: [] for clue_id in clue_ids}
         else:
-            print(f"  Warning: No JSON in LLM response, skipping batch")
+            logger.warning("No JSON in LLM response, skipping batch")
             return {clue_id: [] for clue_id in clue_ids}
 
     # Validate and normalize
@@ -462,8 +463,8 @@ def generate_candidates_batch(
 
     response_text = response.choices[0].message.content
     if not response_text:
-        print(f"DEBUG: Empty response from {model}")
-        print(f"DEBUG: Full response: {response}")
+        logger.debug(f"Empty response from {model}")
+        logger.debug(f"Full response: {response}")
         raise ValueError(f"Empty response from {model}")
     candidates = _parse_response(response_text, clue_ids)
 
@@ -566,14 +567,14 @@ def web_search_prepass(
 
     pop_clues = [c for c in clues if _is_pop_culture_clue(c.text)]
     if not pop_clues:
-        print("  Web pre-pass: no pop culture clues detected")
+        logger.info("Web pre-pass: no pop culture clues detected")
         return {}
 
-    print(f"  Web pre-pass: {len(pop_clues)}/{len(clues)} clues identified as pop culture")
+    logger.info(f"Web pre-pass: {len(pop_clues)}/{len(clues)} clues identified as pop culture")
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print("  Warning: ANTHROPIC_API_KEY not set, skipping web pre-pass")
+        logger.warning("ANTHROPIC_API_KEY not set, skipping web pre-pass")
         return {}
 
     import anthropic
@@ -634,8 +635,6 @@ def web_search_prepass(
             # Silently skip failures (rate limits, network errors)
             return None
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(_search_one, c): c for c in pop_clues}
         for future in as_completed(futures):
@@ -644,7 +643,7 @@ def web_search_prepass(
                 results[result[0]] = result[1]
 
     found = len(results)
-    print(f"  Web pre-pass: {found}/{len(pop_clues)} clues got web-verified candidates")
+    logger.info(f"Web pre-pass: {found}/{len(pop_clues)} clues got web-verified candidates")
     return results
 
 
@@ -915,13 +914,13 @@ def generate_candidates_with_database(
         else:
             llm_needed.append(clue)
 
-    print(f"  Database lookup: {db_hits}/{len(clues)} clues found")
+    logger.info(f"Database lookup: {db_hits}/{len(clues)} clues found")
 
     # Phase 2: LLM fallback for clues not in database
     if llm_needed and use_llm_fallback:
         # Use smaller batches (10 clues) for better LLM reliability
         llm_batch_size = min(batch_size, 10)
-        print(f"  LLM fallback: generating for {len(llm_needed)} clues (batch size {llm_batch_size})...")
+        logger.info(f"LLM fallback: generating for {len(llm_needed)} clues (batch size {llm_batch_size})...")
 
         def on_batch(batch_num: int, total: int, results: Dict[str, List[str]]) -> None:
             if on_progress:
@@ -941,10 +940,10 @@ def generate_candidates_with_database(
         candidates.update(llm_candidates)
 
         llm_hits = sum(1 for cid in llm_candidates if llm_candidates.get(cid))
-        print(f"  LLM generated: {llm_hits}/{len(llm_needed)} clues")
+        logger.info(f"LLM generated: {llm_hits}/{len(llm_needed)} clues")
 
     elif llm_needed and not use_llm_fallback:
-        print(f"  {len(llm_needed)} clues have no database candidates (LLM fallback disabled)")
+        logger.info(f"{len(llm_needed)} clues have no database candidates (LLM fallback disabled)")
 
     return candidates
 
@@ -1036,12 +1035,12 @@ def generate_with_claude(
     try:
         import anthropic
     except ImportError:
-        print("  Warning: anthropic package not installed, skipping Claude generation")
+        logger.warning("anthropic package not installed, skipping Claude generation")
         return {}
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print("  Warning: ANTHROPIC_API_KEY not set, skipping Claude generation")
+        logger.warning("ANTHROPIC_API_KEY not set, skipping Claude generation")
         return {}
 
     client = anthropic.Anthropic(api_key=api_key)
@@ -1105,7 +1104,7 @@ Example: {{"1-across": ["PARIS", "LYONS"], "2-down": ["ECHO", "ARIA"]}}"""
             return batch_candidates
 
         except Exception as e:
-            print(f"  Warning: Claude API error: {e}")
+            logger.warning(f"Claude API error: {e}")
             return {}
 
     batches = [clues[i:i + batch_size] for i in range(0, len(clues), batch_size)]
@@ -1114,7 +1113,6 @@ Example: {{"1-across": ["PARIS", "LYONS"], "2-down": ["ECHO", "ARIA"]}}"""
         for batch in batches:
             all_candidates.update(_process_batch(batch))
     else:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=len(batches)) as executor:
             futures = {executor.submit(_process_batch, batch): i for i, batch in enumerate(batches)}
             for future in as_completed(futures):
@@ -1166,7 +1164,7 @@ def ensure_minimum_candidates(
 
     # Generate with Claude Sonnet for all clues needing more candidates
     if needs_more:
-        print(f"  Padding {len(needs_more)} clues with Claude Sonnet...")
+        logger.info(f"Padding {len(needs_more)} clues with Claude Sonnet...")
         claude_candidates = generate_with_claude(
             needs_more,
             candidates_per_clue=min_candidates * 3,  # Over-request; length filter drops ~50%
@@ -1182,7 +1180,7 @@ def ensure_minimum_candidates(
     # Report final counts
     under_min = sum(1 for clue in clues if len(candidates.get(clue.clue_id, [])) < min_candidates)
     if under_min > 0:
-        print(f"  Warning: {under_min} clues still have < {min_candidates} candidates")
+        logger.warning(f"{under_min} clues still have < {min_candidates} candidates")
 
     return candidates
 
@@ -1274,7 +1272,7 @@ Example: {{"1-across": ["ANSWER1", "ANSWER2"]}}"""
             all_candidates.update(batch_candidates)
 
         except Exception as e:
-            print(f"  Synonym generation error: {e}")
+            logger.warning(f"Synonym generation error: {e}")
 
     return all_candidates
 
@@ -1373,7 +1371,7 @@ Answers must be EXACTLY {clue.length} letters, UPPERCASE, NO SPACES."""
             )
             response_text = response.content[0].text
     except Exception as e:
-        print(f"  Sniper L2 Claude error: {e}")
+        logger.warning(f"Sniper L2 Claude error: {e}")
 
     # Fallback to OpenAI gpt-4o
     if response_text is None:
@@ -1387,7 +1385,7 @@ Answers must be EXACTLY {clue.length} letters, UPPERCASE, NO SPACES."""
             )
             response_text = response.choices[0].message.content
         except Exception as e:
-            print(f"  Sniper L2 OpenAI error: {e}")
+            logger.warning(f"Sniper L2 OpenAI error: {e}")
             return []
 
     if not response_text:
@@ -1531,12 +1529,12 @@ def generate_with_extended_thinking(
     try:
         import anthropic
     except ImportError:
-        print("  Warning: anthropic package not installed, skipping extended thinking")
+        logger.warning("anthropic package not installed, skipping extended thinking")
         return {}
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print("  Warning: ANTHROPIC_API_KEY not set, skipping extended thinking")
+        logger.warning("ANTHROPIC_API_KEY not set, skipping extended thinking")
         return {}
 
     client = anthropic.Anthropic(api_key=api_key)
@@ -1569,7 +1567,7 @@ Each answer must be EXACTLY the specified number of letters, UPPERCASE, NO SPACE
 Respond with ONLY a JSON object: {{"clue_id": ["BEST", "SECOND", ...], ...}}"""
 
         try:
-            print(f"  Extended thinking batch {batch_num}/{total_batches} ({len(batch)} clues)...")
+            logger.info(f"Extended thinking batch {batch_num}/{total_batches} ({len(batch)} clues)...")
             response = client.messages.create(
                 model="claude-sonnet-4-5-20250929",
                 max_tokens=16000,
@@ -1588,7 +1586,7 @@ Respond with ONLY a JSON object: {{"clue_id": ["BEST", "SECOND", ...], ...}}"""
                     break
 
             if not response_text:
-                print(f"    Warning: no text response in batch {batch_num}")
+                logger.warning(f"no text response in batch {batch_num}")
                 continue
 
             # Parse JSON response
@@ -1618,10 +1616,10 @@ Respond with ONLY a JSON object: {{"clue_id": ["BEST", "SECOND", ...], ...}}"""
                     all_results[clue_id] = scored
                     added += 1
 
-            print(f"    Added candidates for {added}/{len(batch)} clues")
+            logger.debug(f"Added candidates for {added}/{len(batch)} clues")
 
         except Exception as e:
-            print(f"    Warning: Extended thinking error: {e}")
+            logger.warning(f"Extended thinking error: {e}")
 
     return all_results
 
@@ -1698,8 +1696,8 @@ Return ONLY a JSON object like {{"14-across": "DEUS", "8-across": "APSE"}}, no o
                 if word_upper in cands_upper:
                     all_anchors[clue_id] = word_upper
                 else:
-                    print(f"  Anchor {clue_id}={word} not in candidates, skipping")
+                    logger.warning(f"Anchor {clue_id}={word} not in candidates, skipping")
         except (json.JSONDecodeError, AttributeError) as e:
-            print(f"  Warning: anchor parse error: {e}")
+            logger.warning(f"Anchor parse error: {e}")
 
     return all_anchors

@@ -14,6 +14,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from loguru import logger
+
 
 # Pricing per million tokens: (input_cost, output_cost)
 MODEL_PRICING: Dict[str, tuple] = {
@@ -118,7 +120,7 @@ class CostTracker:
             extras.append(f"{web_searches} search{'es' if web_searches > 1 else ''}")
         extra_str = f" + {', '.join(extras)}" if extras else ""
 
-        print(f"    [cost] ${cost:.4f}  {label}: {input_tokens:,} in / {output_tokens:,} out{extra_str} ({short_model})")
+        logger.debug(f"[cost] ${cost:.4f}  {label}: {input_tokens:,} in / {output_tokens:,} out{extra_str} ({short_model})")
 
         return cost
 

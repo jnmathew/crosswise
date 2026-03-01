@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from loguru import logger
+
 
 # Default paths relative to project root
 DEFAULT_WORD_LIST_PATHS = [
@@ -48,7 +50,7 @@ class WordIndex:
         """Load all word lists, normalizing to uppercase, stripping spaces/hyphens."""
         for path in paths:
             if not path.exists():
-                print(f"  Warning: Word list not found: {path}")
+                logger.warning(f"Word list not found: {path}")
                 continue
 
             count = 0
@@ -86,9 +88,9 @@ class WordIndex:
 
                     count += 1
 
-            print(f"  Loaded {count:,} words from {path.name}")
+            logger.info(f"Loaded {count:,} words from {path.name}")
 
-        print(f"  Word index total: {len(self._words):,} unique words")
+        logger.info(f"Word index total: {len(self._words):,} unique words")
 
     def contains(self, word: str) -> bool:
         """Check if word exists in the index. O(1) set lookup."""

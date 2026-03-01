@@ -10,10 +10,13 @@ Guided by a crossword-solving skill prompt that teaches constraint-first strateg
 """
 
 import json
+import os
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 
 import anthropic
+from loguru import logger
 
 from src.solver.models import SolverInput
 
@@ -319,16 +322,15 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
         new_answers = json.loads(text)
     except json.JSONDecodeError:
         # Try to find JSON object in the text
-        import re
         json_match = re.search(r'\{[^{}]*\}', text)
         if json_match:
             try:
                 new_answers = json.loads(json_match.group())
             except json.JSONDecodeError:
-                print(f"    Warning: could not parse LLM response")
+                logger.warning("Could not parse LLM response")
                 return {}
         else:
-            print(f"    Warning: no JSON found in LLM response")
+            logger.warning("No JSON found in LLM response")
             return {}
 
     # Validate: correct length, matches pattern, and is in candidates (if we have them)
@@ -339,7 +341,7 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
             continue
         expected_len = solver_input.clue_length(cid)
         if len(word_upper) != expected_len:
-            print(f"    Rejected {cid}={word_upper} (length {len(word_upper)} != {expected_len})")
+            logger.warning(f"Rejected {cid}={word_upper} (length {len(word_upper)} != {expected_len})")
             continue
 
         # Check pattern match
@@ -350,7 +352,7 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
                 pattern_ok = False
                 break
         if not pattern_ok:
-            print(f"    Rejected {cid}={word_upper} (doesn't match pattern {pattern})")
+            logger.warning(f"Rejected {cid}={word_upper} (doesn't match pattern {pattern})")
             continue
 
         validated[cid] = word_upper
@@ -607,7 +609,7 @@ Return ONLY the JSON object."""
             if getattr(b, "type", None) == "server_tool_use"
         )
         if search_count:
-            print(f"      Web searches used: {search_count}")
+            logger.info(f"Web searches used: {search_count}")
 
         if response.stop_reason != "pause_turn":
             break
@@ -628,16 +630,15 @@ Return ONLY the JSON object."""
     try:
         new_answers = json.loads(text)
     except json.JSONDecodeError:
-        import re
         json_match = re.search(r'\{[^{}]*\}', text)
         if json_match:
             try:
                 new_answers = json.loads(json_match.group())
             except json.JSONDecodeError:
-                print(f"      Warning: could not parse conflict resolution response")
+                logger.warning("Could not parse conflict resolution response")
                 return {}
         else:
-            print(f"      Warning: no JSON found in conflict resolution response")
+            logger.warning("No JSON found in conflict resolution response")
             return {}
 
     # Validate lengths
@@ -648,7 +649,7 @@ Return ONLY the JSON object."""
             continue
         expected_len = solver_input.clue_length(cid)
         if len(word_upper) != expected_len:
-            print(f"      Rejected {cid}={word_upper} (length {len(word_upper)} != {expected_len})")
+            logger.warning(f"Rejected {cid}={word_upper} (length {len(word_upper)} != {expected_len})")
             continue
         validated[cid] = word_upper
 
@@ -716,7 +717,6 @@ def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
 
     Returns True on network failures (benefit of the doubt).
     """
-    import os
 
     if not clue_text:
         return True
@@ -742,7 +742,7 @@ def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
             def_lower = def_text.lower()
             for cw in clue_words:
                 if cw in def_lower:
-                    print(f"        Dictionary match: '{cw}' found in definition of {word}")
+                    logger.debug(f"Dictionary match: '{cw}' found in definition of {word}")
                     return True
 
     # Step 3: Ask Haiku — is this word a valid answer for this clue?
@@ -770,7 +770,7 @@ def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
 
         answer = response.content[0].text.strip().lower()
         confirmed = answer.startswith("yes")
-        print(f"        Haiku verification: {word} for \"{clue_text}\" → {answer}")
+        logger.debug(f"Haiku verification: {word} for \"{clue_text}\" → {answer}")
         return confirmed
 
     except Exception:
@@ -847,7 +847,7 @@ def propagate_constraints(
                         assignment[cid] = pattern
                         new_commits[cid] = pattern
                         changed = True
-                        print(f"      {cid} = {pattern} (fully constrained, in candidates)")
+                        logger.debug(f"{cid} = {pattern} (fully constrained, in candidates)")
                 else:
                     # Word NOT in candidates — use dictionary + Haiku to verify it fits the clue
                     clue_text = clue_text_lookup.get(cid, "") if clue_text_lookup else ""
@@ -859,9 +859,9 @@ def propagate_constraints(
                             assignment[cid] = pattern
                             new_commits[cid] = pattern
                             changed = True
-                            print(f"      {cid} = {pattern} (fully constrained, verified)")
+                            logger.debug(f"{cid} = {pattern} (fully constrained, verified)")
                     else:
-                        print(f"      {cid}: pattern {pattern} is a word but verification rejected it for clue \"{clue_text}\"")
+                        logger.debug(f"{cid}: pattern {pattern} is a word but verification rejected it for clue \"{clue_text}\"")
                 continue
 
             cands = candidates.get(cid, [])
@@ -931,7 +931,7 @@ def solve_with_llm(
     # Phase 0: Pre-fill from DB (single-candidate clues)
     assignment = prefill_from_db(solver_input, candidates)
     if assignment:
-        print(f"  DB pre-fill: {len(assignment)}/{total} locked in")
+        logger.info(f"DB pre-fill: {len(assignment)}/{total} locked in")
 
     t0 = time.time()
 
@@ -941,7 +941,7 @@ def solve_with_llm(
             break
 
         elapsed = time.time() - t0
-        print(f"  [{elapsed:.1f}s] LLM solve pass {pass_num}: {len(assignment)}/{total} solved, {remaining} remaining")
+        logger.info(f"[{elapsed:.1f}s] LLM solve pass {pass_num}: {len(assignment)}/{total} solved, {remaining} remaining")
 
         if progress_callback:
             progress_callback(pass_num, len(assignment), total)
@@ -952,7 +952,7 @@ def solve_with_llm(
         )
 
         if not new_answers:
-            print(f"    No new answers — LLM is stuck")
+            logger.info("No new answers — LLM is stuck")
             break
 
         # Merge and validate crossings
@@ -965,17 +965,17 @@ def solve_with_llm(
 
         assignment = validated
         elapsed = time.time() - t0
-        print(f"    [{elapsed:.1f}s] +{len(new_valid)} answers ({rejected} rejected for conflicts), total: {len(assignment)}/{total}")
+        logger.info(f"[{elapsed:.1f}s] +{len(new_valid)} answers ({rejected} rejected for conflicts), total: {len(assignment)}/{total}")
 
         if len(new_valid) == 0:
-            print(f"    All new answers conflicted — stopping")
+            logger.info("All new answers conflicted — stopping")
             break
 
     # Phase: Constraint propagation — auto-commit clues where patterns leave 1 candidate
     remaining = total - len(assignment)
     if remaining > 0:
         elapsed = time.time() - t0
-        print(f"  [{elapsed:.1f}s] Constraint propagation ({remaining} unsolved)...")
+        logger.info(f"[{elapsed:.1f}s] Constraint propagation ({remaining} unsolved)...")
         prop_commits = propagate_constraints(
             solver_input, candidates, assignment,
             candidate_scores=candidate_scores,
@@ -983,17 +983,17 @@ def solve_with_llm(
         )
         if prop_commits:
             elapsed = time.time() - t0
-            print(f"    [{elapsed:.1f}s] +{len(prop_commits)} from constraint propagation, total: {len(assignment)}/{total}")
+            logger.info(f"[{elapsed:.1f}s] +{len(prop_commits)} from constraint propagation, total: {len(assignment)}/{total}")
             for cid, word in sorted(prop_commits.items()):
-                print(f"      {cid} = {word}")
+                logger.debug(f"{cid} = {word}")
         else:
-            print(f"    No auto-commits possible")
+            logger.info("No auto-commits possible")
 
     # Phase: Conflict resolution — backtrack on wrong answers blocking unsolved clues
     remaining = total - len(assignment)
     if remaining > 0:
         elapsed = time.time() - t0
-        print(f"  [{elapsed:.1f}s] Starting conflict resolution ({remaining} unsolved)...")
+        logger.info(f"[{elapsed:.1f}s] Starting conflict resolution ({remaining} unsolved)...")
 
         clusters = find_conflict_clusters(solver_input, assignment, clue_text_lookup)
 
@@ -1004,10 +1004,10 @@ def solve_with_llm(
                     f'{b["clue_id"]}={b["current_answer"]}'
                     for b in cluster["blamed"]
                 ]
-                print(f"    Cluster {i+1}: {len(unsolved_ids)} dead-end clues, "
-                      f"{len(cluster['blamed'])} blamed answers")
-                print(f"      Dead: {', '.join(unsolved_ids)}")
-                print(f"      Blamed: {', '.join(blamed_strs)}")
+                logger.info(f"Cluster {i+1}: {len(unsolved_ids)} dead-end clues, "
+                            f"{len(cluster['blamed'])} blamed answers")
+                logger.info(f"Dead: {', '.join(unsolved_ids)}")
+                logger.info(f"Blamed: {', '.join(blamed_strs)}")
 
                 new_answers = resolve_conflict_cluster(
                     solver_input, clue_text_lookup, candidates,
@@ -1026,16 +1026,16 @@ def solve_with_llm(
                     assignment = validated
                     delta = len(assignment) - old_count
                     elapsed = time.time() - t0
-                    print(f"      [{elapsed:.1f}s] Resolved: {len(assignment)}/{total} "
-                          f"({'+' if delta >= 0 else ''}{delta})")
+                    logger.info(f"[{elapsed:.1f}s] Resolved: {len(assignment)}/{total} "
+                               f"({'+' if delta >= 0 else ''}{delta})")
                 else:
-                    print(f"      No resolution found")
+                    logger.info("No resolution found")
             # After resolving conflicts, run follow-up passes to pick up
             # newly-unblocked clues (conflict resolution adds crossing letters)
             post_remaining = total - len(assignment)
             if post_remaining > 0 and post_remaining < remaining:
                 elapsed = time.time() - t0
-                print(f"  [{elapsed:.1f}s] Post-resolution pass ({post_remaining} remaining)...")
+                logger.info(f"[{elapsed:.1f}s] Post-resolution pass ({post_remaining} remaining)...")
                 new_answers = solve_pass(
                     solver_input, clue_text_lookup, candidates,
                     assignment, pass_num=max_passes + 1,
@@ -1046,9 +1046,9 @@ def solve_with_llm(
                     new_valid = {cid: w for cid, w in new_answers.items() if cid in validated}
                     assignment = validated
                     elapsed = time.time() - t0
-                    print(f"    [{elapsed:.1f}s] +{len(new_valid)} from post-resolution, total: {len(assignment)}/{total}")
+                    logger.info(f"[{elapsed:.1f}s] +{len(new_valid)} from post-resolution, total: {len(assignment)}/{total}")
         else:
-            print(f"    No conflict clusters detected")
+            logger.info("No conflict clusters detected")
 
     # Final constraint propagation after conflict resolution
     remaining = total - len(assignment)
@@ -1060,8 +1060,8 @@ def solve_with_llm(
         )
         if final_commits:
             elapsed = time.time() - t0
-            print(f"    [{elapsed:.1f}s] +{len(final_commits)} from final propagation, total: {len(assignment)}/{total}")
+            logger.info(f"[{elapsed:.1f}s] +{len(final_commits)} from final propagation, total: {len(assignment)}/{total}")
 
     elapsed = time.time() - t0
-    print(f"  [{elapsed:.1f}s] LLM solver done: {len(assignment)}/{total}")
+    logger.info(f"[{elapsed:.1f}s] LLM solver done: {len(assignment)}/{total}")
     return assignment

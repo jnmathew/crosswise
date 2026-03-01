@@ -1,14 +1,16 @@
 """
-Script to solve a crossword puzzle from JSON file using LLM-generated candidates.
+Crossword puzzle solver using multi-pass CSP with LLM-generated candidates.
 
 Supports TSV/SQLite database lookup as primary candidate source with LLM fallback.
 """
 
 import json
-import sys
+import os
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
+
+from loguru import logger
 
 from src.solver.models import SolverInput
 from src.solver.candidate_generator import (
@@ -27,7 +29,6 @@ from src.solver.candidate_generator import (
     sniper_escalation,
     generate_synonyms_batch,
     generate_with_extended_thinking,
-    is_wordplay_clue,
     DEFAULT_MIN_CANDIDATES,
 )
 from src.solver.csp import solve_csp, extract_letter_patterns
@@ -174,7 +175,6 @@ def detect_theme(
     except ImportError:
         return None
 
-    import os
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
@@ -209,7 +209,7 @@ def save_candidates(candidates: Dict[str, List[str]], output_path: str) -> None:
     """Save generated candidates to JSON file."""
     with open(output_path, "w") as f:
         json.dump(candidates, f, indent=2)
-    print(f"Saved candidates to {output_path}")
+    logger.info(f"Saved candidates to {output_path}")
 
 
 def load_candidates(candidates_path: str) -> Dict[str, List[str]]:
@@ -272,16 +272,16 @@ def solve_puzzle(
     puzzle_stem = puzzle_path.stem.replace("_puzzle", "")
 
     # Load puzzle JSON
-    print(f"Loading puzzle from {puzzle_path}...")
+    logger.info(f"Loading puzzle from {puzzle_path}...")
     puzzle_data = load_puzzle_json(str(puzzle_path))
     grid_size = puzzle_data["grid"]["rows"], puzzle_data["grid"]["cols"]
     total_clues = puzzle_data["metadata"]["total_clues"]
-    print(f"  Grid size: {grid_size[0]}x{grid_size[1]}")
-    print(f"  Total clues: {total_clues}")
+    logger.debug(f"  Grid size: {grid_size[0]}x{grid_size[1]}")
+    logger.debug(f"  Total clues: {total_clues}")
 
     # Build solver input directly from JSON
     solver_input = build_solver_input_from_json(puzzle_data)
-    print(f"  Clues for solving: {len(solver_input.clue_cells)}")
+    logger.debug(f"  Clues for solving: {len(solver_input.clue_cells)}")
 
     # Build clue text lookup
     clue_text_lookup = {}
@@ -294,27 +294,27 @@ def solve_puzzle(
     db = None
     if use_database:
         from src.solver.clue_database import ClueDatabase
-        print("\nInitializing clue database...")
+        logger.info("Initializing clue database...")
         db = ClueDatabase()
 
     # Initialize word index (graceful degradation if files missing)
     word_index = None
     try:
         from src.solver.word_index import WordIndex
-        print("\nInitializing word index...")
+        logger.info("Initializing word index...")
         word_index = WordIndex()
         if word_index.size == 0:
             word_index = None
-            print("  Word index empty (no word list files found)")
+            logger.debug("  Word index empty (no word list files found)")
     except Exception as e:
-        print(f"  Word index unavailable: {e}")
+        logger.debug(f"  Word index unavailable: {e}")
 
     # Get or generate initial candidates
     if candidates_path and Path(candidates_path).exists():
-        print(f"\nLoading existing candidates from {candidates_path}...")
+        logger.debug(f"Loading existing candidates from {candidates_path}...")
         candidates = load_candidates(str(candidates_path))
     else:
-        print(f"\n=== PASS 1: Initial candidate generation ({candidates_per_clue} per clue) ===")
+        logger.info(f"=== PASS 1: Initial candidate generation ({candidates_per_clue} per clue) ===")
         clue_inputs = build_clue_inputs_from_json(puzzle_data, solver_input)
 
         if db:
@@ -330,7 +330,7 @@ def solve_puzzle(
         else:
             # LLM-only generation (original behavior)
             def on_batch(batch_num: int, total: int, results: Dict[str, List[str]]) -> None:
-                print(f"  Batch {batch_num}/{total}: {len(results)} clues")
+                logger.info(f"  Batch {batch_num}/{total}: {len(results)} clues")
 
             candidates = generate_candidates(
                 clue_inputs,
@@ -342,7 +342,7 @@ def solve_puzzle(
 
         # Ensure minimum candidates per clue (prevents single-candidate blocking)
         if db and min_candidates > 1:
-            print(f"\n=== Ensuring minimum {min_candidates} candidates per clue ===")
+            logger.info(f"=== Ensuring minimum {min_candidates} candidates per clue ===")
             candidates = ensure_minimum_candidates(
                 clue_inputs,
                 candidates,
@@ -354,7 +354,7 @@ def solve_puzzle(
 
         # Apply Bouncer Filter (cross-reference against DB + word index)
         if db is not None or word_index is not None:
-            print(f"\n=== Bouncer Filter: verifying candidates ===")
+            logger.info("=== Bouncer Filter: verifying candidates ===")
             scored = bouncer_filter(
                 candidates, db=db, word_index=word_index,
                 clue_text_lookup=clue_text_lookup,
@@ -363,7 +363,7 @@ def solve_puzzle(
                 sum(1 for sc in scs if sc.verified) for scs in scored.values()
             )
             total_count = sum(len(scs) for scs in scored.values())
-            print(f"  {verified_count}/{total_count} candidates verified")
+            logger.debug(f"  {verified_count}/{total_count} candidates verified")
             # Extract score map for value ordering in CSP
             score_map = to_score_map(scored)
             # Convert back to plain format (sorted by score)
@@ -400,9 +400,9 @@ def solve_puzzle(
                          if cid in candidates and 0 < len(candidates[cid]) <= 2]
 
         if missing:
-            print(f"\n  {len(missing)} clues have no candidates")
+            logger.debug(f"  {len(missing)} clues have no candidates")
         if low_candidates:
-            print(f"  {len(low_candidates)} clues have <=2 candidates")
+            logger.debug(f"  {len(low_candidates)} clues have <=2 candidates")
 
         # Attempt solve (seed with high-confidence previous answers for pass 2+)
         seed = None
@@ -415,9 +415,9 @@ def solve_puzzle(
                     seed[cid] = word
             if not seed:
                 seed = None
-        print(f"\n=== PASS {pass_num}: Solving with CSP solver ===")
+        logger.info(f"=== PASS {pass_num}: Solving with CSP solver ===")
         if seed:
-            print(f"  Seeding with {len(seed)}/{len(prev_assignment)} high-confidence clues")
+            logger.debug(f"  Seeding with {len(seed)}/{len(prev_assignment)} high-confidence clues")
         result = solve_csp(
             solver_input, candidates, return_partial=True,
             use_mac=use_mac, use_cdbj=use_cdbj,
@@ -426,15 +426,15 @@ def solve_puzzle(
             mac_mode=mac_mode,
         )
 
-        print(f"  Solved: {result.solved}")
-        print(f"  Assigned: {len(result.assignment)}/{len(solver_input.clue_cells)} clues")
-        print(f"  Time: {result.time_ms:.2f}ms")
-        print(f"  Nodes: {result.nodes_expanded}, Backtracks: {result.backtracks}", end="")
+        logger.debug(f"  Solved: {result.solved}")
+        logger.debug(f"  Assigned: {len(result.assignment)}/{len(solver_input.clue_cells)} clues")
+        logger.debug(f"  Time: {result.time_ms:.2f}ms")
+        stats_line = f"  Nodes: {result.nodes_expanded}, Backtracks: {result.backtracks}"
         if result.backjumps:
-            print(f", Backjumps: {result.backjumps}", end="")
+            stats_line += f", Backjumps: {result.backjumps}"
         if result.arc_consistency_pruned:
-            print(f", AC-3 pruned: {result.arc_consistency_pruned}", end="")
-        print()
+            stats_line += f", AC-3 pruned: {result.arc_consistency_pruned}"
+        logger.debug(stats_line)
 
         # Save assignment for seeding next pass
         prev_assignment = result.assignment.copy() if result.assignment else None
@@ -444,16 +444,16 @@ def solve_puzzle(
 
         # Theme detection (after first pass with partial solution)
         if enable_theme_detection and pass_num == 1 and len(result.assignment) > 0:
-            print("\n  === Theme Detection ===")
+            logger.info("=== Theme Detection ===")
             theme_pattern = detect_theme(puzzle_data, result.assignment)
             if theme_pattern:
-                print(f"  Theme detected: {theme_pattern}")
+                logger.debug(f"  Theme detected: {theme_pattern}")
             else:
-                print(f"  No theme pattern detected")
+                logger.debug("  No theme pattern detected")
 
         # Not solved - try to improve using letter patterns from partial solution
         if len(result.assignment) == 0:
-            print("\n  No progress made - cannot extract patterns")
+            logger.debug("  No progress made - cannot extract patterns")
             break
 
         # Extended thinking round: after pass 1, generate candidates for ALL unsolved clues
@@ -473,7 +473,7 @@ def solve_puzzle(
                 ))
 
             if thinking_clues:
-                print(f"\n  === Extended Thinking: {len(thinking_clues)} unsolved clues ===")
+                logger.info(f"=== Extended Thinking: {len(thinking_clues)} unsolved clues ===")
                 thinking_results = generate_with_extended_thinking(
                     thinking_clues, word_index=word_index,
                 )
@@ -490,7 +490,7 @@ def solve_puzzle(
                             for sc in scored_cands:
                                 if sc.word not in score_map[clue_id]:
                                     score_map[clue_id][sc.word] = sc.confidence
-                print(f"  Extended thinking added candidates for {thinking_added}/{len(thinking_clues)} clues")
+                logger.debug(f"  Extended thinking added candidates for {thinking_added}/{len(thinking_clues)} clues")
 
                 # Save updated candidates after thinking round
                 candidates_output = output_dir / f"{puzzle_stem}_candidates.json"
@@ -508,10 +508,10 @@ def solve_puzzle(
         }
 
         if not unsolved_with_patterns:
-            print("\n  No useful patterns found - cannot improve")
+            logger.debug("  No useful patterns found - cannot improve")
             break
 
-        print(f"\n=== PASS {pass_num + 1}: Regenerating {len(unsolved_with_patterns)} clues with patterns ===")
+        logger.info(f"=== PASS {pass_num + 1}: Regenerating {len(unsolved_with_patterns)} clues with patterns ===")
 
         # Build constrained clue inputs
         constrained_clues = []
@@ -525,7 +525,7 @@ def solve_puzzle(
                 category=categorize_clue(text),
                 num_crossings=solver_input.crossing_count(clue_id),
             ))
-            print(f"  {clue_id}: {pattern} - \"{text[:40]}...\"" if len(text) > 40 else f"  {clue_id}: {pattern} - \"{text}\"")
+            logger.debug(f"  {clue_id}: {pattern} - \"{text[:40]}...\"" if len(text) > 40 else f"  {clue_id}: {pattern} - \"{text}\"")
 
         # Regenerate with patterns (more candidates for constrained clues)
         if db:
@@ -570,7 +570,7 @@ def solve_puzzle(
                             is_verified = (word_index and word_index.contains(w))
                             score_map[clue_id][w] = 0.65 if is_verified else 0.35
 
-        print(f"  Updated {updated} clues with new pattern-matched candidates")
+        logger.debug(f"  Updated {updated} clues with new pattern-matched candidates")
 
         # Synonym regeneration for definition clues on first regen pass
         if pass_num == 1 and not database_only:
@@ -579,7 +579,7 @@ def solve_puzzle(
                 if c.category == "definition" and len(candidates.get(c.clue_id, [])) < 15
             ]
             if definition_clues:
-                print(f"\n  === Synonym Generation: {len(definition_clues)} definition clues ===")
+                logger.info(f"=== Synonym Generation: {len(definition_clues)} definition clues ===")
                 synonym_results = generate_synonyms_batch(definition_clues, model=model)
                 syn_added = 0
                 for clue_id, syns in synonym_results.items():
@@ -594,7 +594,7 @@ def solve_puzzle(
                             for s in new_syns:
                                 is_verified = (word_index and word_index.contains(s))
                                 score_map[clue_id][s] = 0.6 if is_verified else 0.4
-                print(f"  Synonyms added for {syn_added}/{len(definition_clues)} clues")
+                logger.debug(f"  Synonyms added for {syn_added}/{len(definition_clues)} clues")
 
         # Sniper phases: skip when extended thinking is active (thinking replaces sniping)
         if not use_thinking:
@@ -604,7 +604,7 @@ def solve_puzzle(
                 if len(candidates.get(c.clue_id, [])) <= 5
             ]
             if bottleneck_clues and sniper_max_level > 0 and not database_only:
-                print(f"\n  === Bottleneck Sniper: {len(bottleneck_clues)} clues with <=5 candidates ===")
+                logger.info(f"=== Bottleneck Sniper: {len(bottleneck_clues)} clues with <=5 candidates ===")
                 for clue in bottleneck_clues:
                     sniper_results = sniper_escalation(
                         clue, db=db, word_index=word_index, max_level=sniper_max_level,
@@ -619,7 +619,7 @@ def solve_puzzle(
                             for sc in sniper_results:
                                 if sc.word not in score_map[clue.clue_id]:
                                     score_map[clue.clue_id][sc.word] = 0.7 if sc.verified else 0.5
-                            print(f"    {clue.clue_id}: +{len(new_words)} bottleneck sniper")
+                            logger.debug(f"    {clue.clue_id}: +{len(new_words)} bottleneck sniper")
 
             # Sniper escalation for unsolved clues with rich patterns (>30% known letters)
             sniper_count = 0
@@ -628,7 +628,7 @@ def solve_puzzle(
                 if c.pattern and sum(1 for ch in c.pattern if ch != "_") / len(c.pattern) > 0.3
             ]
             if sniper_eligible and sniper_max_level > 0:
-                print(f"\n  === Sniper Phase: {len(sniper_eligible)} clues eligible for escalation ===")
+                logger.info(f"=== Sniper Phase: {len(sniper_eligible)} clues eligible for escalation ===")
                 for clue in sniper_eligible:
                     sniper_results = sniper_escalation(
                         clue, db=db, word_index=word_index, max_level=sniper_max_level,
@@ -645,23 +645,17 @@ def solve_puzzle(
                             for sc in sniper_results:
                                 if sc.word not in score_map[clue.clue_id]:
                                     score_map[clue.clue_id][sc.word] = 0.7 if sc.verified else 0.5
-                            print(f"    {clue.clue_id}: +{len(new_words)} from sniper (L{sniper_results[0].source[-1]})")
-                print(f"  Sniper added candidates for {sniper_count}/{len(sniper_eligible)} clues")
+                            logger.debug(f"    {clue.clue_id}: +{len(new_words)} from sniper (L{sniper_results[0].source[-1]})")
+                logger.debug(f"  Sniper added candidates for {sniper_count}/{len(sniper_eligible)} clues")
 
         # Save updated candidates
         candidates_output = output_dir / f"{puzzle_stem}_candidates.json"
         save_candidates(candidates, str(candidates_output))
 
     # Final result
-    print(f"\n{'='*60}")
-    print("FINAL RESULT")
-    print(f"{'='*60}")
-
     if result and result.solved:
-        # Verify solution
         is_valid = verify_solution(solver_input, result.assignment)
-        print("  Status: SOLVED")
-        print(f"  Valid: {is_valid}")
+        logger.info(f"SOLVED — {len(result.assignment)} clues, valid={is_valid}")
 
         # Save solution
         solution_output = output_dir / f"{puzzle_stem}_solution.json"
@@ -687,88 +681,13 @@ def solve_puzzle(
         }
         with open(solution_output, "w") as f:
             json.dump(solution_data, f, indent=2)
-        print(f"\nSaved solution to {solution_output}")
-
-        # Print sample answers
-        print("\nSample answers:")
-        for clue_id, word in sorted(result.assignment.items())[:15]:
-            print(f"  {clue_id}: {word}")
-        if len(result.assignment) > 15:
-            print(f"  ... and {len(result.assignment) - 15} more")
-
+        logger.info(f"Saved solution to {solution_output}")
     else:
-        print("  Status: FAILED")
         if result:
-            print(f"  Best partial: {len(result.assignment)}/{len(solver_input.clue_cells)} clues")
-        print("\nConsider:")
-        print("  - Using a better model (gpt-4o, o1-mini)")
-        print("  - Increasing candidates per clue (-n 16)")
-        print("  - Checking clues with no candidates")
+            logger.warning(f"FAILED — best partial: {len(result.assignment)}/{len(solver_input.clue_cells)} clues")
+        else:
+            logger.warning("FAILED — no result")
 
     return result.assignment if result else {}
 
 
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Solve a crossword puzzle from JSON file")
-    parser.add_argument("puzzle", help="Path to puzzle JSON file")
-    parser.add_argument("--candidates", "-c", help="Path to existing candidates JSON (skip generation)")
-    parser.add_argument("--candidates-per-clue", "-n", type=int, default=8,
-                        help="Number of candidates to generate per clue (default: 8)")
-    parser.add_argument("--model", "-m", default="gpt-4o-mini",
-                        help="OpenAI model to use (default: gpt-4o-mini). Try gpt-4o or o1-mini for better accuracy.")
-    parser.add_argument("--output-dir", "-o", help="Output directory (defaults to puzzle directory)")
-    parser.add_argument("--max-passes", "-p", type=int, default=3,
-                        help="Maximum solve passes with pattern refinement (default: 3)")
-    parser.add_argument("--use-database", "-d", action="store_true",
-                        help="Use TSV/SQLite clue database for candidate lookup (with LLM fallback)")
-    parser.add_argument("--database-only", action="store_true",
-                        help="Use only database for candidates (no LLM fallback)")
-    parser.add_argument("--min-candidates", type=int, default=DEFAULT_MIN_CANDIDATES,
-                        help=f"Minimum candidates per clue (default: {DEFAULT_MIN_CANDIDATES}). "
-                             "Prevents single-candidate clues from blocking the solver.")
-    parser.add_argument("--use-o1-for-wordplay", action="store_true",
-                        help="Use o1 model for pun/wordplay clues (clues ending with ?)")
-
-    # v2.0 solver flags
-    parser.add_argument("--no-mac", action="store_true",
-                        help="Disable MAC (use forward checking instead)")
-    parser.add_argument("--no-cdbj", action="store_true",
-                        help="Disable conflict-directed backjumping (use chronological)")
-    parser.add_argument("--sniper-max-level", type=int, default=3,
-                        help="Maximum sniper escalation level (0=disabled, 1-3, default: 3)")
-    parser.add_argument("--enable-theme-detection", action="store_true",
-                        help="Enable lightweight theme detection")
-    parser.add_argument("--mac-mode", default="full", choices=["full", "search-only", "off"],
-                        help="MAC mode: full (AC-3+MAC), search-only (MAC during search, no AC-3 preprocessing), off (FC only)")
-    parser.add_argument("--use-thinking", action="store_true",
-                        help="Use Claude extended thinking for unsolved clues after pass 1 (~$0.75/run). "
-                             "Replaces the sniper loop with higher-quality one-shot generation.")
-
-    args = parser.parse_args()
-
-    # --database-only implies --use-database
-    use_db = args.use_database or args.database_only
-
-    # --no-mac overrides mac_mode to "off"
-    mac_mode = "off" if args.no_mac else args.mac_mode
-
-    solve_puzzle(
-        args.puzzle,
-        candidates_path=args.candidates,
-        output_dir=args.output_dir,
-        candidates_per_clue=args.candidates_per_clue,
-        model=args.model,
-        max_passes=args.max_passes,
-        use_database=use_db,
-        database_only=args.database_only,
-        min_candidates=args.min_candidates,
-        use_o1_for_wordplay=args.use_o1_for_wordplay,
-        use_mac=mac_mode != "off",
-        use_cdbj=not args.no_cdbj,
-        sniper_max_level=args.sniper_max_level,
-        enable_theme_detection=args.enable_theme_detection,
-        mac_mode=mac_mode,
-        use_thinking=args.use_thinking,
-    )

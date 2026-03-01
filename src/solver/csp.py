@@ -13,6 +13,7 @@ And two backtracking strategies:
 import time
 from collections import deque
 from typing import Dict, List, Tuple, Optional, Set
+from loguru import logger
 from src.solver.models import SolverInput, SolveResult
 
 
@@ -402,7 +403,7 @@ class CSPSolver:
         max_restarts = 50
         for i, (_, start_clue) in enumerate(candidates):
             if i >= max_restarts:
-                print(f"  Tried {max_restarts} starting points, best partial: {len(self.best_partial)} clues")
+                logger.debug(f"Tried {max_restarts} starting points, best partial: {len(self.best_partial)} clues")
                 break
             # Reset domains for fresh start
             self._reset_domains()
