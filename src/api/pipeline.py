@@ -296,57 +296,27 @@ def run_solve_background(
         loop.close()
 
 
-def _run_solve(
-    session_dir: Path,
-    puzzles_dir: Path,
-    puzzle_id: str,
-    put_progress,
-    session_mgr,
-    session_id: str,
-):
-    from src.solver.solve_puzzle import build_solver_input_from_json, build_clue_inputs_from_json
+def _generate_candidates(clue_inputs, put_progress, _elapsed):
+    """Generate, pad, and score candidate answers for all clues.
+
+    Returns (candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db).
+    """
     from src.solver.candidate_generator import (
         generate_candidates_with_database,
         generate_with_claude,
-        regenerate_with_patterns,
         bouncer_filter,
         to_plain_candidates,
         to_score_map,
-        ensure_minimum_candidates,
-        categorize_clue,
         web_search_prepass,
-        ClueInput,
     )
-    from src.solver.csp import solve_csp, extract_letter_patterns
-    from src.solver.llm_solver import solve_with_llm
     from src.solver.clue_database import ClueDatabase
-    from src.solver.generate_hints import generate_hints_batch
-    from src.solver.cost_tracker import reset_tracker
-
-    _t0 = time.time()
-    def _elapsed():
-        return f"[{time.time() - _t0:.1f}s]"
-
-    # Reset cost tracker for this solve
-    tracker = reset_tracker()
-
-    session_mgr.update_status(session_id, SessionStatus.SOLVING)
-
-    with open(session_dir / "puzzle.json") as f:
-        puzzle_data = json.load(f)
-
-    put_progress(SolveProgress(stage="setup", message="Building solver input...", progress=0.05))
-
-    solver_input = build_solver_input_from_json(puzzle_data)
-    clue_inputs = build_clue_inputs_from_json(puzzle_data, solver_input)
 
     # Build clue text lookup for bouncer filter
     clue_text_lookup = {}
-    for direction in ("across", "down"):
-        for clue in puzzle_data["clues"].get(direction, []):
-            clue_text_lookup[f"{clue['number']}-{direction}"] = clue["text"]
+    for ci in clue_inputs:
+        clue_text_lookup[ci.clue_id] = ci.text
 
-    # Generate candidates (DB lookup + Claude fallback instead of OpenAI)
+    # Database lookup
     logger.info(f"{_elapsed()} Starting candidate generation")
     put_progress(SolveProgress(stage="candidates", message="Database lookup...", progress=0.1))
     db = ClueDatabase()
@@ -355,17 +325,15 @@ def _run_solve(
     )
 
     # Track which candidates came from DB vs LLM
-    # candidate_sources: clue_id -> {word -> source_label}
     candidate_sources: Dict[str, Dict[str, str]] = {}
     for cid, words in candidates.items():
         candidate_sources[cid] = {w.upper(): "db" for w in words}
 
-    # Web search pre-pass: run pop culture clues through Haiku with web search
+    # Web search pre-pass
     logger.info(f"{_elapsed()} Running web search pre-pass")
     put_progress(SolveProgress(stage="candidates", message="Web search pre-pass...", progress=0.12))
     web_candidates = web_search_prepass(clue_inputs)
 
-    # Merge web candidates into the main candidates dict
     for cid, word in web_candidates.items():
         existing = candidates.get(cid, [])
         if word not in [w.upper() for w in existing]:
@@ -374,7 +342,7 @@ def _run_solve(
         candidate_sources.setdefault(cid, {})
         candidate_sources[cid][word.upper()] = "web"
 
-    # Run Opus (zero-DB-hit clues) and Sonnet padding (<5 candidates) in parallel
+    # Parallel Opus (zero-hit) + Sonnet padding (<5 candidates)
     clues_needing_llm = [c for c in clue_inputs if not candidates.get(c.clue_id)]
     clues_needing_pad = [c for c in clue_inputs if 0 < len(candidates.get(c.clue_id, [])) < 5]
 
@@ -422,7 +390,7 @@ def _run_solve(
     if clues_needing_pad:
         logger.info(f"  {_elapsed()} Sonnet padded: {len(clues_needing_pad)} clues")
 
-    # Second-pass: catch any clues still under 5 (e.g. Opus clues that returned few results)
+    # Second-pass: catch any clues still under 5
     still_under = [c for c in clue_inputs if len(candidates.get(c.clue_id, [])) < 5]
     if still_under:
         logger.info(f"  {_elapsed()} Second-pass padding for {len(still_under)} clues still under 5")
@@ -438,20 +406,28 @@ def _run_solve(
                 candidate_sources[cid].setdefault(w.upper(), "sonnet")
 
     logger.info(f"{_elapsed()} Padding complete")
-    # Bouncer filter: score and sort candidates by DB/word-index verification
+
+    # Bouncer filter: score and sort candidates
     put_progress(SolveProgress(stage="candidates", message="Scoring candidates...", progress=0.25))
     scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
     score_map = to_score_map(scored)
     candidates = to_plain_candidates(scored)
 
-    # Build candidate_scores dict for constraint propagation: clue_id -> {word -> score}
     candidate_scores: Dict[str, Dict[str, float]] = {}
     for cid, sc_list in scored.items():
         candidate_scores[cid] = {sc.word: sc.confidence for sc in sc_list}
 
-    total = len(clue_inputs)
+    return candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db, clue_text_lookup
 
-    # LLM iterative solver — replaces CSP + refinement passes
+
+def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, score_map, total, put_progress, _elapsed):
+    """Run LLM iterative solver with CSP cleanup fallback.
+
+    Returns (assignment, solved_count).
+    """
+    from src.solver.llm_solver import solve_with_llm
+    from src.solver.csp import solve_csp
+
     logger.info(f"{_elapsed()} Starting LLM iterative solver")
 
     def _llm_progress(pass_num, solved_count, total_count):
@@ -486,12 +462,15 @@ def _run_solve(
             assignment = r.assignment
             logger.info(f"{_elapsed()} CSP cleanup: {len(assignment)}/{total}")
 
-    solved = len(assignment)
+    return assignment, len(assignment)
 
-    # Final scoring for diagnostics (ensures all clues are represented)
+
+def _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir):
+    """Build and save per-clue solve diagnostics JSON."""
+    from src.solver.candidate_generator import bouncer_filter
+
     final_scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
 
-    # Save per-clue diagnostics
     diagnostics = []
     for ci in clue_inputs:
         cid = ci.clue_id
@@ -521,18 +500,18 @@ def _run_solve(
             "assigned_answer": answer,
             "status": status,
         })
+
     with open(session_dir / "solve_diagnostics.json", "w") as f:
         json.dump(diagnostics, f, indent=2)
 
-    put_progress(SolveProgress(
-        stage="solved",
-        message=f"Solved {solved}/{total} clues",
-        progress=0.6,
-    ))
 
-    # Generate hints
-    logger.info(f"{_elapsed()} CSP complete, starting hints")
-    session_mgr.update_status(session_id, SessionStatus.GENERATING_HINTS)
+def _generate_and_apply_hints(puzzle_data, assignment, put_progress, _elapsed):
+    """Generate hints in parallel batches, apply to puzzle_data in-place.
+
+    Returns list of solved clue dicts.
+    """
+    from src.solver.generate_hints import generate_hints_batch
+
     solved_clues = []
     for direction in ("across", "down"):
         for clue in puzzle_data["clues"][direction]:
@@ -547,37 +526,93 @@ def _run_solve(
                     "answer": answer,
                 })
 
-    if solved_clues:
-        batch_size = 20
-        batches = [solved_clues[i:i + batch_size] for i in range(0, len(solved_clues), batch_size)]
-        total_batches = len(batches)
-        put_progress(SolveProgress(
-            stage="hints",
-            message=f"Generating hints ({total_batches} batches in parallel)...",
-            progress=0.6,
-        ))
+    if not solved_clues:
+        return solved_clues
 
-        all_hints: List[Dict[str, str]] = []
-        with ThreadPoolExecutor(max_workers=total_batches) as executor:
-            futures = {executor.submit(generate_hints_batch, batch): i for i, batch in enumerate(batches)}
-            for future in as_completed(futures):
-                batch_num = futures[future] + 1
-                hints = future.result()
-                all_hints.extend(hints)
-                put_progress(SolveProgress(
-                    stage="hints",
-                    message=f"Hints batch {batch_num}/{total_batches} done",
-                    progress=0.6 + 0.35 * (len(all_hints) / len(solved_clues)),
-                ))
+    batch_size = 20
+    batches = [solved_clues[i:i + batch_size] for i in range(0, len(solved_clues), batch_size)]
+    total_batches = len(batches)
+    put_progress(SolveProgress(
+        stage="hints",
+        message=f"Generating hints ({total_batches} batches in parallel)...",
+        progress=0.6,
+    ))
 
-        # Map hints back
-        hint_map = {h["id"]: h for h in all_hints}
-        for direction in ("across", "down"):
-            for clue in puzzle_data["clues"][direction]:
-                key = f"{clue['number']}-{direction}"
-                if key in hint_map:
-                    clue["hint"] = hint_map[key]["hint"]
-                    clue["explanation"] = hint_map[key]["explanation"]
+    all_hints: List[Dict[str, str]] = []
+    with ThreadPoolExecutor(max_workers=total_batches) as executor:
+        futures = {executor.submit(generate_hints_batch, batch): i for i, batch in enumerate(batches)}
+        for future in as_completed(futures):
+            batch_num = futures[future] + 1
+            hints = future.result()
+            all_hints.extend(hints)
+            put_progress(SolveProgress(
+                stage="hints",
+                message=f"Hints batch {batch_num}/{total_batches} done",
+                progress=0.6 + 0.35 * (len(all_hints) / len(solved_clues)),
+            ))
+
+    # Map hints back to puzzle_data
+    hint_map = {h["id"]: h for h in all_hints}
+    for direction in ("across", "down"):
+        for clue in puzzle_data["clues"][direction]:
+            key = f"{clue['number']}-{direction}"
+            if key in hint_map:
+                clue["hint"] = hint_map[key]["hint"]
+                clue["explanation"] = hint_map[key]["explanation"]
+
+    return solved_clues
+
+
+def _run_solve(
+    session_dir: Path,
+    puzzles_dir: Path,
+    puzzle_id: str,
+    put_progress,
+    session_mgr,
+    session_id: str,
+):
+    """Orchestrate the full solve pipeline: candidates -> solve -> diagnostics -> hints."""
+    from src.solver.solve_puzzle import build_solver_input_from_json, build_clue_inputs_from_json
+    from src.solver.cost_tracker import reset_tracker
+
+    _t0 = time.time()
+    def _elapsed():
+        return f"[{time.time() - _t0:.1f}s]"
+
+    tracker = reset_tracker()
+    session_mgr.update_status(session_id, SessionStatus.SOLVING)
+
+    with open(session_dir / "puzzle.json") as f:
+        puzzle_data = json.load(f)
+
+    put_progress(SolveProgress(stage="setup", message="Building solver input...", progress=0.05))
+    solver_input = build_solver_input_from_json(puzzle_data)
+    clue_inputs = build_clue_inputs_from_json(puzzle_data, solver_input)
+    total = len(clue_inputs)
+
+    # 1. Generate and score candidates
+    candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db, clue_text_lookup = \
+        _generate_candidates(clue_inputs, put_progress, _elapsed)
+
+    # 2. Solve
+    assignment, solved = _run_solver(
+        solver_input, clue_text_lookup, candidates,
+        candidate_scores, score_map, total, put_progress, _elapsed,
+    )
+
+    # 3. Save diagnostics
+    _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir)
+
+    put_progress(SolveProgress(
+        stage="solved",
+        message=f"Solved {solved}/{total} clues",
+        progress=0.6,
+    ))
+
+    # 4. Generate hints
+    logger.info(f"{_elapsed()} Solve complete, starting hints")
+    session_mgr.update_status(session_id, SessionStatus.GENERATING_HINTS)
+    _generate_and_apply_hints(puzzle_data, assignment, put_progress, _elapsed)
 
     # Save enriched puzzle
     puzzle_path = puzzles_dir / f"{puzzle_id}.json"
@@ -589,8 +624,6 @@ def _run_solve(
         solved_count=solved, total_clues=total,
     )
 
-    # Print cost summary
     logger.info(f"\n{tracker.summary()}\n")
-
     logger.info(f"{_elapsed()} Done")
     put_progress(SolveProgress(stage="complete", message="Puzzle ready!", progress=1.0))
