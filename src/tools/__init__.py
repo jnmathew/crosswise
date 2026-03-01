@@ -1,1 +1,1 @@
-"""Production tools for image masking and preprocessing."""
+"""Production tools for crossword puzzle processing."""
