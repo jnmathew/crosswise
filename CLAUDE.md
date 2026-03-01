@@ -43,7 +43,6 @@ Key dependencies:
 
 **image_preprocessing.py** - General image preprocessing utilities:
 - Four-point perspective transform for grid warping
-- Rotation correction (detects and fixes grid alignment using Hough line detection)
 - Contour analysis and quadrilateral extraction
 
 **clue_column_detector.py** - Multi-column layout detection for clue extraction:
@@ -138,9 +137,9 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 **clue_database.py** - SQLite-backed clue database:
 - Two data sources: xd TSV (7.5M pairs) + CrosswordQA from HuggingFace (6.8M pairs)
 - CrosswordQA deduplicated against xd on (answer, clue_normalized) — ~9-11M total after dedup
-- Download CrosswordQA: `bash scripts/download_crosswordqa.sh`
+- Download all data sources: `bash scripts/setup_data.sh` (or `make setup`)
 - Converts to SQLite on first use (`data/clues.db`); delete DB to force rebuild from sources
-- Simplified schema: `(id, answer, clue, clue_normalized, length)` — no pubid/year
+- Simplified schema: `(id, answer, clue_normalized, length)` — no pubid/year/raw clue
 - Provides fast lookup by clue text, pattern matching, and answer length
 - Pattern matching uses GLOB (e.g., `C_T` matches `CAT`, `COT`, `CUT`)
 
