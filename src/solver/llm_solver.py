@@ -267,18 +267,15 @@ def solve_pass(
         instruction = """This is pass 1. Commit answers you are CERTAIN about (>90% confidence).
 These will be locked in and their letters will constrain crossing clues in the next pass.
 Look for: proper nouns, fixed phrases ("— ex machina" = DEUS), and clues with only one plausible answer.
-Use web search to verify any proper nouns you're unsure about.
 Aim for 15-25 confident answers."""
     elif pass_num <= 3:
         instruction = f"""This is pass {pass_num}. You now have crossing letters from previous passes.
 Use the patterns to narrow down answers — if only one candidate matches the pattern, commit it.
 For example, if pattern is A_B_R and the clue is "Ann —, Michigan", ARBOR is the only possibility.
-Search to verify ambiguous proper nouns or factual answers before committing.
 Be more aggressive now — the crossing letters give you strong constraints."""
     else:
         instruction = f"""This is pass {pass_num}. Most of the grid should be filled.
 For remaining clues, use ALL available crossing letters and your best judgment.
-Use web search for any factual clues you're still unsure about.
 At this stage it's better to commit a reasonable answer than leave blanks.
 Only skip clues where you genuinely have no idea."""
 
@@ -297,50 +294,19 @@ Return a JSON object mapping clue_id to answer for ONLY the clues you're confide
 Example: {{"14-across": "DEUS", "8-across": "APSE"}}
 Return ONLY the JSON object, no other text. If you're not confident about any, return {{}}."""
 
+    from src.solver.cost_tracker import get_tracker
+
     client = anthropic.Anthropic()
 
-    tools = [{
-        "type": "web_search_20250305",
-        "name": "web_search",
-        "max_uses": 3,
-    }]
+    response = client.messages.create(
+        model=model,
+        max_tokens=4096,
+        system=SKILL_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    get_tracker().track(response, f"solve_pass_{pass_num}")
 
-    messages = [{"role": "user", "content": prompt}]
-
-    # Loop to handle pause_turn (server-side search may need continuation)
-    response = None
-    search_count = 0
-    for _turn in range(4):  # up to 3 continuations + initial
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=SKILL_PROMPT,
-            messages=messages,
-            tools=tools,
-        )
-
-        # Count web searches in this response
-        for block in response.content:
-            if getattr(block, "type", None) == "server_tool_use":
-                search_count += 1
-
-        if response.stop_reason != "pause_turn":
-            break
-
-        # Continue the conversation so Claude can finish after search results
-        messages.append({"role": "assistant", "content": response.content})
-        messages.append({"role": "user", "content": "Continue solving. Return your JSON answer."})
-
-    if search_count > 0:
-        print(f"    Web searches used: {search_count}")
-
-    # Extract text from mixed content blocks (response may contain
-    # server_tool_use and web_search_tool_result blocks alongside text)
-    text_parts = []
-    for block in response.content:
-        if hasattr(block, "text"):
-            text_parts.append(block.text)
-    text = "\n".join(text_parts).strip()
+    text = response.content[0].text.strip()
     # Strip markdown fences if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
@@ -612,6 +578,8 @@ Return a JSON object with answers for ALL clues in this cluster (both the blamed
 Example: {{"9-down": "PEPO", "17-across": "OPEN"}}
 Return ONLY the JSON object."""
 
+    from src.solver.cost_tracker import get_tracker
+
     client = anthropic.Anthropic()
 
     tools = [{
@@ -623,6 +591,7 @@ Return ONLY the JSON object."""
     messages = [{"role": "user", "content": prompt}]
 
     response = None
+    tracker = get_tracker()
     for _turn in range(4):
         response = client.messages.create(
             model=model,
@@ -631,6 +600,7 @@ Return ONLY the JSON object."""
             messages=messages,
             tools=tools,
         )
+        tracker.track(response, "conflict_resolution")
 
         search_count = sum(
             1 for b in response.content
@@ -712,12 +682,244 @@ def prefill_from_db(
     return validated
 
 
+def _get_dictionary_definitions(word: str) -> Optional[str]:
+    """Fetch definitions from Free Dictionary API. Returns combined definition text or None."""
+    import requests
+
+    try:
+        resp = requests.get(
+            f"https://api.dictionaryapi.dev/api/v2/entries/en/{word.lower()}",
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        all_defs = []
+        for entry in data:
+            for meaning in entry.get("meanings", []):
+                for defn in meaning.get("definitions", []):
+                    all_defs.append(defn.get("definition", ""))
+                for syn in meaning.get("synonyms", []):
+                    all_defs.append(syn)
+        return " | ".join(all_defs) if all_defs else None
+    except Exception:
+        return None
+
+
+def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
+    """Verify a fully-constrained word fits the clue using dictionary + Haiku.
+
+    1. Fetch dictionary definitions (free API)
+    2. Quick word-overlap check — if clue word appears in definition, accept
+    3. Otherwise, ask Haiku with the definition text: "does this word fit this clue?"
+
+    Returns True on network failures (benefit of the doubt).
+    """
+    import os
+
+    if not clue_text:
+        return True
+
+    # Step 1: Get dictionary definitions
+    def_text = _get_dictionary_definitions(word)
+
+    # Step 2: Quick word-overlap check
+    if def_text:
+        skip = {"a", "an", "the", "of", "in", "on", "to", "for", "and", "or", "is",
+                "it", "by", "at", "no", "not", "so", "as", "up", "do", "be", "he",
+                "she", "we", "my", "me", "us", "its", "has", "had", "was", "are",
+                "but", "if", "can", "may", "one", "two", "who", "how", "all", "any",
+                "own", "too", "did", "get", "got", "let", "say", "new", "old", "big",
+                "see", "way", "day", "man", "his", "her", "out", "now", "use"}
+        clue_words = set()
+        for w in clue_text.lower().split():
+            cleaned = w.strip("\"'.,!?;:-\u2014()[]")
+            if len(cleaned) > 2 and cleaned not in skip:
+                clue_words.add(cleaned)
+
+        if clue_words:
+            def_lower = def_text.lower()
+            for cw in clue_words:
+                if cw in def_lower:
+                    print(f"        Dictionary match: '{cw}' found in definition of {word}")
+                    return True
+
+    # Step 3: Ask Haiku — is this word a valid answer for this clue?
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return True  # Can't verify, allow it
+
+    try:
+        import anthropic
+        from src.solver.cost_tracker import get_tracker
+
+        client = anthropic.Anthropic(api_key=api_key)
+
+        prompt = f'Crossword clue: "{clue_text}"\nProposed answer: {word}'
+        if def_text:
+            prompt += f'\nDictionary definition of {word}: {def_text}'
+        prompt += '\n\nIs this answer correct for this crossword clue? Reply with ONLY "yes" or "no".'
+
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=10,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        get_tracker().track(response, "verify_word", model="claude-haiku-4-5-20251001")
+
+        answer = response.content[0].text.strip().lower()
+        confirmed = answer.startswith("yes")
+        print(f"        Haiku verification: {word} for \"{clue_text}\" → {answer}")
+        return confirmed
+
+    except Exception:
+        return True  # Network error — allow it
+
+
+def propagate_constraints(
+    solver_input: SolverInput,
+    candidates: Dict[str, List[str]],
+    assignment: Dict[ClueId, Word],
+    candidate_scores: Optional[Dict[str, Dict[str, float]]] = None,
+    min_bouncer_score: float = 0.6,
+    clue_text_lookup: Optional[Dict[str, str]] = None,
+) -> Dict[ClueId, Word]:
+    """Auto-commit clues where crossing-letter patterns eliminate all but one candidate.
+
+    Pure logic, zero API cost, runs in milliseconds. Iterates until no more
+    single-candidate clues remain (each commit may unlock others).
+
+    For fully-constrained patterns (all letters known from crossings), verifies
+    the word exists in the word index AND its dictionary definition matches the
+    clue text before committing.
+
+    Args:
+        solver_input: Solver input with grid structure.
+        candidates: Dict of clue_id -> list of candidate words.
+        assignment: Current assignment (mutated in-place).
+        candidate_scores: Optional dict of clue_id -> {word -> bouncer_score}.
+            Used when 2+ candidates survive the pattern — auto-commits the top
+            one if its score is >= min_bouncer_score and significantly higher.
+        min_bouncer_score: Minimum bouncer score for auto-committing a candidate
+            when it's the sole survivor or the clear top choice.
+        clue_text_lookup: Optional dict of clue_id -> clue text for dictionary verification.
+
+    Returns:
+        Dict of newly committed clue_id -> word (subset added to assignment).
+    """
+    from src.solver.word_index import WordIndex
+    word_index = WordIndex()
+
+    new_commits: Dict[ClueId, Word] = {}
+    changed = True
+
+    while changed:
+        changed = False
+        patterns = extract_patterns(solver_input, assignment)
+
+        for cid in list(patterns.keys()):
+            if cid in assignment:
+                continue
+
+            pattern = patterns[cid]
+            length = solver_input.clue_length(cid)
+            known = sum(1 for ch in pattern if ch != "_")
+
+            # Only consider clues with at least 1 crossing letter
+            if known == 0:
+                continue
+
+            # Fully constrained pattern (all letters known from crossings)
+            # — the word is forced. Verify it's valid before committing.
+            if known == length:
+                if not word_index.contains(pattern):
+                    continue
+
+                # If the word is already in the candidate list, trust it —
+                # candidate generation already verified it fits the clue.
+                in_candidates = pattern in [c.upper() for c in candidates.get(cid, [])]
+
+                if in_candidates:
+                    trial = {**assignment, cid: pattern}
+                    validated = validate_assignment(solver_input, trial)
+                    if cid in validated:
+                        assignment[cid] = pattern
+                        new_commits[cid] = pattern
+                        changed = True
+                        print(f"      {cid} = {pattern} (fully constrained, in candidates)")
+                else:
+                    # Word NOT in candidates — use dictionary + Haiku to verify it fits the clue
+                    clue_text = clue_text_lookup.get(cid, "") if clue_text_lookup else ""
+                    confirmed = _dictionary_and_haiku_confirm(pattern, clue_text)
+                    if confirmed:
+                        trial = {**assignment, cid: pattern}
+                        validated = validate_assignment(solver_input, trial)
+                        if cid in validated:
+                            assignment[cid] = pattern
+                            new_commits[cid] = pattern
+                            changed = True
+                            print(f"      {cid} = {pattern} (fully constrained, verified)")
+                    else:
+                        print(f"      {cid}: pattern {pattern} is a word but verification rejected it for clue \"{clue_text}\"")
+                continue
+
+            cands = candidates.get(cid, [])
+            if not cands:
+                continue
+
+            # Filter candidates to those matching the pattern
+            matching = []
+            for c in cands:
+                c_upper = c.upper()
+                if len(c_upper) != length:
+                    continue
+                ok = all(
+                    pattern[j] == "_" or pattern[j] == c_upper[j]
+                    for j in range(length)
+                )
+                if ok:
+                    matching.append(c_upper)
+
+            candidate_word = None
+            if len(matching) == 1:
+                word = matching[0]
+                # Check bouncer score if available
+                if candidate_scores:
+                    score = candidate_scores.get(cid, {}).get(word, 0.0)
+                    if score < min_bouncer_score:
+                        continue
+                candidate_word = word
+            elif len(matching) >= 2 and candidate_scores:
+                # 2+ survivors — check if one clearly dominates
+                scored = [(w, candidate_scores.get(cid, {}).get(w, 0.0)) for w in matching]
+                scored.sort(key=lambda x: x[1], reverse=True)
+                top_word, top_score = scored[0]
+                runner_up_score = scored[1][1]
+
+                # Auto-commit if top candidate has strong score and clear lead
+                if top_score >= min_bouncer_score and top_score - runner_up_score >= 0.15:
+                    candidate_word = top_word
+
+            if candidate_word:
+                # Validate this single commit against current assignment
+                trial = {**assignment, cid: candidate_word}
+                validated = validate_assignment(solver_input, trial)
+                if cid in validated:
+                    assignment[cid] = candidate_word
+                    new_commits[cid] = candidate_word
+                    changed = True
+
+    return new_commits
+
+
 def solve_with_llm(
     solver_input: SolverInput,
     clue_text_lookup: Dict[str, str],
     candidates: Dict[str, List[str]],
     max_passes: int = 6,
     progress_callback=None,
+    candidate_scores: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Dict[ClueId, Word]:
     """
     Iterative LLM-based crossword solver.
@@ -768,6 +970,24 @@ def solve_with_llm(
         if len(new_valid) == 0:
             print(f"    All new answers conflicted — stopping")
             break
+
+    # Phase: Constraint propagation — auto-commit clues where patterns leave 1 candidate
+    remaining = total - len(assignment)
+    if remaining > 0:
+        elapsed = time.time() - t0
+        print(f"  [{elapsed:.1f}s] Constraint propagation ({remaining} unsolved)...")
+        prop_commits = propagate_constraints(
+            solver_input, candidates, assignment,
+            candidate_scores=candidate_scores,
+            clue_text_lookup=clue_text_lookup,
+        )
+        if prop_commits:
+            elapsed = time.time() - t0
+            print(f"    [{elapsed:.1f}s] +{len(prop_commits)} from constraint propagation, total: {len(assignment)}/{total}")
+            for cid, word in sorted(prop_commits.items()):
+                print(f"      {cid} = {word}")
+        else:
+            print(f"    No auto-commits possible")
 
     # Phase: Conflict resolution — backtrack on wrong answers blocking unsolved clues
     remaining = total - len(assignment)
@@ -829,6 +1049,18 @@ def solve_with_llm(
                     print(f"    [{elapsed:.1f}s] +{len(new_valid)} from post-resolution, total: {len(assignment)}/{total}")
         else:
             print(f"    No conflict clusters detected")
+
+    # Final constraint propagation after conflict resolution
+    remaining = total - len(assignment)
+    if remaining > 0:
+        final_commits = propagate_constraints(
+            solver_input, candidates, assignment,
+            candidate_scores=candidate_scores,
+            clue_text_lookup=clue_text_lookup,
+        )
+        if final_commits:
+            elapsed = time.time() - t0
+            print(f"    [{elapsed:.1f}s] +{len(final_commits)} from final propagation, total: {len(assignment)}/{total}")
 
     elapsed = time.time() - t0
     print(f"  [{elapsed:.1f}s] LLM solver done: {len(assignment)}/{total}")

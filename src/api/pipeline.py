@@ -387,17 +387,22 @@ def _run_solve(
         to_score_map,
         ensure_minimum_candidates,
         categorize_clue,
+        web_search_prepass,
         ClueInput,
     )
     from src.solver.csp import solve_csp, extract_letter_patterns
     from src.solver.llm_solver import solve_with_llm
     from src.solver.clue_database import ClueDatabase
     from src.solver.generate_hints import generate_hints_batch
+    from src.solver.cost_tracker import reset_tracker
 
     import time as _time
     _t0 = _time.time()
     def _elapsed():
         return f"[{_time.time() - _t0:.1f}s]"
+
+    # Reset cost tracker for this solve
+    tracker = reset_tracker()
 
     session_mgr.update_status(session_id, SessionStatus.SOLVING)
 
@@ -428,6 +433,20 @@ def _run_solve(
     candidate_sources: Dict[str, Dict[str, str]] = {}
     for cid, words in candidates.items():
         candidate_sources[cid] = {w.upper(): "db" for w in words}
+
+    # Web search pre-pass: run pop culture clues through Haiku with web search
+    print(f"{_elapsed()} Running web search pre-pass")
+    put_progress(SolveProgress(stage="candidates", message="Web search pre-pass...", progress=0.12))
+    web_candidates = web_search_prepass(clue_inputs)
+
+    # Merge web candidates into the main candidates dict
+    for cid, word in web_candidates.items():
+        existing = candidates.get(cid, [])
+        if word not in [w.upper() for w in existing]:
+            existing.append(word)
+            candidates[cid] = existing
+        candidate_sources.setdefault(cid, {})
+        candidate_sources[cid][word.upper()] = "web"
 
     # Run Opus (zero-DB-hit clues) and Sonnet padding (<5 candidates) in parallel
     clues_needing_llm = [c for c in clue_inputs if not candidates.get(c.clue_id)]
@@ -497,9 +516,14 @@ def _run_solve(
     print(f"{_elapsed()} Padding complete")
     # Bouncer filter: score and sort candidates by DB/word-index verification
     put_progress(SolveProgress(stage="candidates", message="Scoring candidates...", progress=0.25))
-    scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources)
+    scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
     score_map = to_score_map(scored)
     candidates = to_plain_candidates(scored)
+
+    # Build candidate_scores dict for constraint propagation: clue_id -> {word -> score}
+    candidate_scores: Dict[str, Dict[str, float]] = {}
+    for cid, sc_list in scored.items():
+        candidate_scores[cid] = {sc.word: sc.confidence for sc in sc_list}
 
     total = len(clue_inputs)
 
@@ -517,6 +541,7 @@ def _run_solve(
         solver_input, clue_text_lookup, candidates,
         max_passes=6,
         progress_callback=_llm_progress,
+        candidate_scores=candidate_scores,
     )
     print(f"{_elapsed()} LLM solver: {len(assignment)}/{total}")
 
@@ -540,7 +565,7 @@ def _run_solve(
     solved = len(assignment)
 
     # Final scoring for diagnostics (ensures all clues are represented)
-    final_scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources)
+    final_scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
 
     # Save per-clue diagnostics
     diagnostics = []
@@ -641,6 +666,9 @@ def _run_solve(
         session_id, SessionStatus.COMPLETE,
         solved_count=solved, total_clues=total,
     )
+
+    # Print cost summary
+    print(f"\n{tracker.summary()}\n")
 
     print(f"{_elapsed()} Done")
     put_progress(SolveProgress(stage="complete", message="Puzzle ready!", progress=1.0))
