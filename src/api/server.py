@@ -1,11 +1,7 @@
-"""
-FastAPI server for Crosswise photo upload pipeline.
-
-Usage:
-    .venv/bin/python3 -m src.api.server
-"""
+"""FastAPI server for the Crosswise crossword puzzle app."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import uvicorn
@@ -137,7 +133,7 @@ async def manual_crop(session_id: str, req: ManualCropRequest):
         raise HTTPException(400, "corners must be exactly 4 points, each [x, y]")
 
     try:
-        result = pipeline.run_manual_crop(session_dir, req.corners, settings)
+        result = pipeline.run_grid_detection(session_dir, settings, manual_quad=req.corners)
     except Exception as e:
         raise HTTPException(422, f"Manual crop failed: {e}")
 
@@ -208,8 +204,8 @@ async def submit_mask(session_id: str, mask: MaskRequest, background_tasks: Back
 async def retrigger_solve(session_id: str, background_tasks: BackgroundTasks):
     """Re-trigger the solve for an existing session (e.g., after pipeline fix)."""
     session_dir = session_mgr.get_session_dir(session_id)
-    puzzle_json = session_dir / "puzzle.json"
-    if not puzzle_json.exists():
+    puzzlejson = session_dir / "puzzle.json"
+    if not puzzlejson.exists():
         raise HTTPException(404, "No puzzle.json found for this session")
 
     puzzle_id = session_mgr.get_session_data(session_id).get("puzzle_id", session_id)
@@ -239,7 +235,7 @@ async def stream_progress(session_id: str):
         while True:
             try:
                 progress = await asyncio.wait_for(queue.get(), timeout=120)
-                yield f"data: {progress.model_dump_json()}\n\n"
+                yield f"data: {progress.model_dumpjson()}\n\n"
                 if progress.stage in ("complete", "failed"):
                     progress_queues.pop(session_id, None)
                     break
@@ -252,13 +248,12 @@ async def stream_progress(session_id: str):
 @app.get("/api/{session_id}/diagnostics")
 async def get_diagnostics(session_id: str):
     """Return per-clue solve diagnostics (candidates, sources, scores)."""
-    import json as _json
     session_dir = session_mgr.get_session_dir(session_id)
     diag_path = session_dir / "solve_diagnostics.json"
     if not diag_path.exists():
         raise HTTPException(404, "No diagnostics available — solve has not run yet")
     with open(diag_path) as f:
-        return _json.load(f)
+        return json.load(f)
 
 
 @app.get("/api/{session_id}/status", response_model=SolveStatusResponse)
@@ -277,7 +272,6 @@ async def list_puzzles():
     PUZZLES_DIR.mkdir(parents=True, exist_ok=True)
     puzzles = []
     for p in sorted(PUZZLES_DIR.glob("*.json")):
-        import json
         with open(p) as f:
             data = json.load(f)
         meta = data.get("metadata", {})
@@ -299,16 +293,15 @@ async def list_puzzles():
 @app.patch("/api/puzzles/{puzzle_id}")
 async def update_puzzle(puzzle_id: str, body: dict):
     """Update puzzle metadata (e.g. name)."""
-    import json as _json
     puzzle_path = PUZZLES_DIR / f"{puzzle_id}.json"
     if not puzzle_path.exists():
         raise HTTPException(404, "Puzzle not found")
     with open(puzzle_path) as f:
-        data = _json.load(f)
+        data = json.load(f)
     if "name" in body:
         data.setdefault("metadata", {})["name"] = body["name"]
     with open(puzzle_path, "w") as f:
-        _json.dump(data, f, indent=2)
+        json.dump(data, f, indent=2)
     return {"ok": True}
 
 

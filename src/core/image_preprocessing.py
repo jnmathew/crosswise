@@ -7,6 +7,7 @@ Pipeline:
 3. Apply perspective transform to warp to square
 4. Generate grayscale and binary outputs
 """
+from itertools import combinations
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
@@ -75,82 +76,6 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     rect[1] = pts[np.argmin(diff)]      # top-right (smallest diff)
     rect[3] = pts[np.argmax(diff)]      # bottom-left (largest diff)
     return rect
-
-
-def correct_rotation(image: np.ndarray) -> Tuple[np.ndarray, float]:
-    """
-    Detect and correct rotation in warped grid image to make grid lines perfectly horizontal/vertical.
-
-    Args:
-        image: Warped image (grayscale or color)
-
-    Returns:
-        Tuple of (rotated image, rotation angle in degrees)
-    """
-    # Convert to grayscale if needed
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image.copy()
-
-    # Apply edge detection
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-
-    # Detect lines using Hough transform
-    lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=100)
-
-    if lines is None or len(lines) < 10:
-        logger.debug("Not enough lines detected for rotation correction, skipping")
-        return image, 0.0
-
-    # Separate horizontal and vertical lines
-    h_angles = []
-    v_angles = []
-
-    for line in lines:
-        rho, theta = line[0]
-        angle_deg = np.degrees(theta)
-
-        # Horizontal lines: angle near 0° or 180°
-        if (angle_deg < 10 or angle_deg > 170):
-            h_angles.append(theta)
-        # Vertical lines: angle near 90°
-        elif (80 < angle_deg < 100):
-            v_angles.append(theta)
-
-    # Calculate rotation angle
-    rotation_angle = 0.0
-
-    if h_angles:
-        # Use horizontal lines to determine rotation
-        median_h = np.median(h_angles)
-        rotation_angle = np.degrees(median_h)
-        # Normalize to [-45, 45] range
-        if rotation_angle > 45:
-            rotation_angle -= 180
-    elif v_angles:
-        # Use vertical lines to determine rotation
-        median_v = np.median(v_angles)
-        rotation_angle = np.degrees(median_v) - 90
-        # Normalize to [-45, 45] range
-        if rotation_angle > 45:
-            rotation_angle -= 180
-        elif rotation_angle < -45:
-            rotation_angle += 180
-
-    # Only apply rotation if it's significant (> 0.1 degrees)
-    if abs(rotation_angle) < 0.1:
-        logger.debug(f"Rotation angle {rotation_angle:.3f}° is negligible, skipping correction")
-        return image, 0.0
-
-    # Apply rotation
-    h, w = image.shape[:2]
-    center = (w // 2, h // 2)
-    matrix = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
-    rotated = cv2.warpAffine(image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-    logger.info(f"Applied rotation correction: {rotation_angle:.3f}°")
-    return rotated, rotation_angle
 
 
 def detect_page_boundaries(image: np.ndarray, min_area_ratio: float = 0.3) -> Optional[np.ndarray]:
@@ -398,8 +323,6 @@ def _contour_quad_from_mask(mask: np.ndarray, approx_eps: float = 0.02) -> Optio
         and largest_area > first_quad_area * 1.5
     ):
         # Try all 4-vertex subsets to find the largest convex sub-quad
-        from itertools import combinations
-
         verts = largest_approx.reshape(-1, 2).astype("float32")
         best_sub_area = 0
         best_sub_quad = None
@@ -787,11 +710,6 @@ def preprocess(input_path: Path, config: Settings, manual_quad: Optional[np.ndar
     # Warp to square
     warped = four_point_transform(original, quad, dst_size=1000)
 
-    # Apply rotation correction to align grid perfectly
-    # TEMPORARILY DISABLED - applying too much rotation
-    # warped, rotation_angle = correct_rotation(warped)
-    rotation_angle = 0.0
-
     # Generate grayscale and threshold images
     warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
     warped_thresh = adaptive_thresh(warped_gray)
@@ -805,9 +723,8 @@ def preprocess(input_path: Path, config: Settings, manual_quad: Optional[np.ndar
         "warped_thresh": warped_thresh,
         "quad_points": quad,
         "meta": {
-            "strategy_used": "multi-strategy",  # Could track which strategy worked
+            "strategy_used": "multi-strategy",
             "quad_area_ratio": float(area_ratio),
             "max_dimension": max(original.shape[:2]),
-            "rotation_correction_degrees": float(rotation_angle)
         }
     }

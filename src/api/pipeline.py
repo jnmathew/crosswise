@@ -7,10 +7,13 @@ import asyncio
 import base64
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List
 
 import cv2
+from loguru import logger
 import numpy as np
 from dotenv import load_dotenv
 
@@ -20,28 +23,14 @@ from src.core.config import Settings
 from src.api.models import MaskRequest, SolveProgress, SessionStatus
 
 
-def run_grid_detection(session_dir: Path, config: Settings) -> Dict[str, Any]:
-    """Phase 1: Preprocess image and detect grid."""
-    from src.core.image_preprocessing import preprocess
-    from src.core.grid_detection import detect_grid, assign_clue_numbers, compute_clue_slots
+def _serialize_and_save_grid(cells, clue_slots, session_dir: Path) -> Dict[str, Any]:
+    """Serialize grid cells to JSON and save to session directory.
 
-    original_path = session_dir / "original.jpg"
-    result = preprocess(original_path, config)
-
-    # Save warped images
-    cv2.imwrite(str(session_dir / "warped.jpg"), result["warped"])
-    cv2.imwrite(str(session_dir / "warped_gray.jpg"), result["warped_gray"])
-
-    # Detect grid
-    grid_result = detect_grid(result["warped_gray"], config)
-    cells = grid_result["cells"]
-    assign_clue_numbers(cells)
-    clue_slots = compute_clue_slots(cells)
-
+    Returns dict with rows, cols, cells_data for callers that need the raw data.
+    """
     rows = len(cells)
     cols = len(cells[0]) if rows > 0 else 0
 
-    # Serialize cells for JSON storage
     cells_data = []
     for r in range(rows):
         row_data = []
@@ -65,60 +54,42 @@ def run_grid_detection(session_dir: Path, config: Settings) -> Dict[str, Any]:
     with open(session_dir / "grid_data.json", "w") as f:
         json.dump(grid_data, f, indent=2)
 
-    return {
-        "grid_size": (rows, cols),
-        "clue_slot_count": len(clue_slots),
-    }
+    return {"rows": rows, "cols": cols, "cells_data": cells_data}
 
 
-def run_manual_crop(session_dir: Path, corners: list[list[float]], config: Settings) -> Dict[str, Any]:
-    """Re-run grid detection with user-specified quad corners."""
+def run_grid_detection(
+    session_dir: Path,
+    config: Settings,
+    manual_quad: Any = None,
+) -> Dict[str, Any]:
+    """Phase 1: Preprocess image and detect grid.
+
+    Args:
+        manual_quad: Optional user-specified quad corners (list of [x, y] pairs).
+                     If provided, uses these instead of auto-detection.
+    """
     from src.core.image_preprocessing import preprocess
     from src.core.grid_detection import detect_grid, assign_clue_numbers, compute_clue_slots
 
     original_path = session_dir / "original.jpg"
-    manual_quad = np.array(corners, dtype="float32")
+
+    if manual_quad is not None and not isinstance(manual_quad, np.ndarray):
+        manual_quad = np.array(manual_quad, dtype="float32")
 
     result = preprocess(original_path, config, manual_quad=manual_quad)
 
-    # Save warped images (overwrite previous detection)
     cv2.imwrite(str(session_dir / "warped.jpg"), result["warped"])
     cv2.imwrite(str(session_dir / "warped_gray.jpg"), result["warped_gray"])
 
-    # Detect grid on the new warp
     grid_result = detect_grid(result["warped_gray"], config)
     cells = grid_result["cells"]
     assign_clue_numbers(cells)
     clue_slots = compute_clue_slots(cells)
 
-    rows = len(cells)
-    cols = len(cells[0]) if rows > 0 else 0
-
-    cells_data = []
-    for r in range(rows):
-        row_data = []
-        for c in range(cols):
-            cell = cells[r][c]
-            row_data.append({
-                "row": cell.row,
-                "col": cell.col,
-                "is_block": cell.is_block,
-                "clue_number": cell.clue_number,
-            })
-        cells_data.append(row_data)
-
-    grid_data = {
-        "rows": rows,
-        "cols": cols,
-        "cells": cells_data,
-        "clue_slots": clue_slots,
-    }
-
-    with open(session_dir / "grid_data.json", "w") as f:
-        json.dump(grid_data, f, indent=2)
+    info = _serialize_and_save_grid(cells, clue_slots, session_dir)
 
     return {
-        "grid_size": (rows, cols),
+        "grid_size": (info["rows"], info["cols"]),
         "clue_slot_count": len(clue_slots),
     }
 
@@ -141,29 +112,7 @@ def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[st
     assign_clue_numbers(cells)
     clue_slots = compute_clue_slots(cells)
 
-    # Serialize and save
-    cells_data = []
-    for r in range(rows):
-        row_data = []
-        for c in range(cols):
-            cell = cells[r][c]
-            row_data.append({
-                "row": cell.row,
-                "col": cell.col,
-                "is_block": cell.is_block,
-                "clue_number": cell.clue_number,
-            })
-        cells_data.append(row_data)
-
-    grid_data = {
-        "rows": rows,
-        "cols": cols,
-        "cells": cells_data,
-        "clue_slots": clue_slots,
-    }
-
-    with open(session_dir / "grid_data.json", "w") as f:
-        json.dump(grid_data, f, indent=2)
+    info = _serialize_and_save_grid(cells, clue_slots, session_dir)
 
     clue_number_count = max(
         (cell.clue_number for row in cells for cell in row if cell.clue_number is not None),
@@ -171,7 +120,7 @@ def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[st
     )
 
     return {
-        "grid_size": (rows, cols),
+        "grid_size": (info["rows"], info["cols"]),
         "clue_slot_count": len(clue_slots),
         "clue_number_count": clue_number_count,
     }
@@ -180,7 +129,6 @@ def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[st
 def resize_grid(session_dir: Path, rows: int, cols: int) -> Dict[str, Any]:
     """Re-detect black cells at new grid dimensions using evenly-spaced lines."""
     from src.core.grid_detection import classify_black_cells, assign_clue_numbers, compute_clue_slots
-    from src.core.models import Cell
 
     warped_path = session_dir / "warped_gray.jpg"
     warped_gray = cv2.imread(str(warped_path), cv2.IMREAD_GRAYSCALE)
@@ -189,7 +137,6 @@ def resize_grid(session_dir: Path, rows: int, cols: int) -> Dict[str, Any]:
 
     h, w = warped_gray.shape[:2]
 
-    # Evenly divide into rows x cols
     xs = [round(i * w / cols) for i in range(cols + 1)]
     ys = [round(i * h / rows) for i in range(rows + 1)]
 
@@ -197,33 +144,13 @@ def resize_grid(session_dir: Path, rows: int, cols: int) -> Dict[str, Any]:
     assign_clue_numbers(cells)
     clue_slots = compute_clue_slots(cells)
 
-    # Serialize and save
-    cells_data = []
-    black_cells = []
-    for r in range(rows):
-        row_data = []
-        row_blacks = []
-        for c in range(cols):
-            cell = cells[r][c]
-            row_data.append({
-                "row": cell.row,
-                "col": cell.col,
-                "is_block": cell.is_block,
-                "clue_number": cell.clue_number,
-            })
-            row_blacks.append(cell.is_block)
-        cells_data.append(row_data)
-        black_cells.append(row_blacks)
+    info = _serialize_and_save_grid(cells, clue_slots, session_dir)
 
-    grid_data = {
-        "rows": rows,
-        "cols": cols,
-        "cells": cells_data,
-        "clue_slots": clue_slots,
-    }
-
-    with open(session_dir / "grid_data.json", "w") as f:
-        json.dump(grid_data, f, indent=2)
+    # Also return black_cells map for the GridEditor UI
+    black_cells = [
+        [cells[r][c].is_block for c in range(cols)]
+        for r in range(rows)
+    ]
 
     return {
         "grid_size": [rows, cols],
@@ -396,10 +323,9 @@ def _run_solve(
     from src.solver.generate_hints import generate_hints_batch
     from src.solver.cost_tracker import reset_tracker
 
-    import time as _time
-    _t0 = _time.time()
+    _t0 = time.time()
     def _elapsed():
-        return f"[{_time.time() - _t0:.1f}s]"
+        return f"[{time.time() - _t0:.1f}s]"
 
     # Reset cost tracker for this solve
     tracker = reset_tracker()
@@ -421,7 +347,7 @@ def _run_solve(
             clue_text_lookup[f"{clue['number']}-{direction}"] = clue["text"]
 
     # Generate candidates (DB lookup + Claude fallback instead of OpenAI)
-    print(f"{_elapsed()} Starting candidate generation")
+    logger.info(f"{_elapsed()} Starting candidate generation")
     put_progress(SolveProgress(stage="candidates", message="Database lookup...", progress=0.1))
     db = ClueDatabase()
     candidates = generate_candidates_with_database(
@@ -435,7 +361,7 @@ def _run_solve(
         candidate_sources[cid] = {w.upper(): "db" for w in words}
 
     # Web search pre-pass: run pop culture clues through Haiku with web search
-    print(f"{_elapsed()} Running web search pre-pass")
+    logger.info(f"{_elapsed()} Running web search pre-pass")
     put_progress(SolveProgress(stage="candidates", message="Web search pre-pass...", progress=0.12))
     web_candidates = web_search_prepass(clue_inputs)
 
@@ -457,8 +383,6 @@ def _run_solve(
         message=f"Generating candidates ({len(clues_needing_llm)} Opus + {len(clues_needing_pad)} Sonnet padding)...",
         progress=0.15,
     ))
-
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _run_opus():
         if clues_needing_llm:
@@ -483,7 +407,7 @@ def _run_solve(
         for w in words:
             candidate_sources[cid].setdefault(w.upper(), "llm")
     if clues_needing_llm:
-        print(f"  {_elapsed()} Opus generated: {sum(1 for v in opus_cands.values() if v)}/{len(clues_needing_llm)} clues")
+        logger.info(f"  {_elapsed()} Opus generated: {sum(1 for v in opus_cands.values() if v)}/{len(clues_needing_llm)} clues")
 
     # Merge Sonnet padding candidates
     for cid, words in sonnet_cands.items():
@@ -496,12 +420,12 @@ def _run_solve(
         for w in words:
             candidate_sources[cid].setdefault(w.upper(), "sonnet")
     if clues_needing_pad:
-        print(f"  {_elapsed()} Sonnet padded: {len(clues_needing_pad)} clues")
+        logger.info(f"  {_elapsed()} Sonnet padded: {len(clues_needing_pad)} clues")
 
     # Second-pass: catch any clues still under 5 (e.g. Opus clues that returned few results)
     still_under = [c for c in clue_inputs if len(candidates.get(c.clue_id, [])) < 5]
     if still_under:
-        print(f"  {_elapsed()} Second-pass padding for {len(still_under)} clues still under 5")
+        logger.info(f"  {_elapsed()} Second-pass padding for {len(still_under)} clues still under 5")
         extra = generate_with_claude(still_under, candidates_per_clue=15, model="claude-sonnet-4-20250514")
         for cid, words in extra.items():
             existing = set(candidates.get(cid, []))
@@ -513,7 +437,7 @@ def _run_solve(
             for w in words:
                 candidate_sources[cid].setdefault(w.upper(), "sonnet")
 
-    print(f"{_elapsed()} Padding complete")
+    logger.info(f"{_elapsed()} Padding complete")
     # Bouncer filter: score and sort candidates by DB/word-index verification
     put_progress(SolveProgress(stage="candidates", message="Scoring candidates...", progress=0.25))
     scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
@@ -528,7 +452,7 @@ def _run_solve(
     total = len(clue_inputs)
 
     # LLM iterative solver — replaces CSP + refinement passes
-    print(f"{_elapsed()} Starting LLM iterative solver")
+    logger.info(f"{_elapsed()} Starting LLM iterative solver")
 
     def _llm_progress(pass_num, solved_count, total_count):
         put_progress(SolveProgress(
@@ -543,11 +467,11 @@ def _run_solve(
         progress_callback=_llm_progress,
         candidate_scores=candidate_scores,
     )
-    print(f"{_elapsed()} LLM solver: {len(assignment)}/{total}")
+    logger.info(f"{_elapsed()} LLM solver: {len(assignment)}/{total}")
 
     # CSP cleanup for any remaining unsolved clues
     if len(assignment) < total and len(assignment) > 0:
-        print(f"{_elapsed()} Running CSP cleanup on {total - len(assignment)} remaining clues")
+        logger.info(f"{_elapsed()} Running CSP cleanup on {total - len(assignment)} remaining clues")
         put_progress(SolveProgress(
             stage="solving",
             message=f"CSP cleanup: {total - len(assignment)} clues remaining...",
@@ -560,7 +484,7 @@ def _run_solve(
         )
         if len(r.assignment) > len(assignment):
             assignment = r.assignment
-            print(f"{_elapsed()} CSP cleanup: {len(assignment)}/{total}")
+            logger.info(f"{_elapsed()} CSP cleanup: {len(assignment)}/{total}")
 
     solved = len(assignment)
 
@@ -607,7 +531,7 @@ def _run_solve(
     ))
 
     # Generate hints
-    print(f"{_elapsed()} CSP complete, starting hints")
+    logger.info(f"{_elapsed()} CSP complete, starting hints")
     session_mgr.update_status(session_id, SessionStatus.GENERATING_HINTS)
     solved_clues = []
     for direction in ("across", "down"):
@@ -624,8 +548,6 @@ def _run_solve(
                 })
 
     if solved_clues:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         batch_size = 20
         batches = [solved_clues[i:i + batch_size] for i in range(0, len(solved_clues), batch_size)]
         total_batches = len(batches)
@@ -668,7 +590,7 @@ def _run_solve(
     )
 
     # Print cost summary
-    print(f"\n{tracker.summary()}\n")
+    logger.info(f"\n{tracker.summary()}\n")
 
-    print(f"{_elapsed()} Done")
+    logger.info(f"{_elapsed()} Done")
     put_progress(SolveProgress(stage="complete", message="Puzzle ready!", progress=1.0))

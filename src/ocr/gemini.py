@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import re
 from pathlib import Path
 
@@ -31,8 +32,6 @@ class GeminiOCRProvider:
         api_key: str | None = None,
         model: str = "gemini-3-flash-preview",
     ):
-        import os
-
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
         self.model = model
 

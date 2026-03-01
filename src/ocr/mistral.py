@@ -4,6 +4,9 @@ import base64
 import json
 import os
 from pathlib import Path
+from typing import List
+
+from pydantic import BaseModel
 
 
 class MistralOCRProvider:
@@ -16,19 +19,16 @@ class MistralOCRProvider:
         self.model = model
 
     def extract_clues(self, image_path: Path) -> str:
-        from typing import List as TypingList
-
         from mistralai import Mistral, ImageURLChunk
         from mistralai.extra import response_format_from_pydantic_model
-        from pydantic import BaseModel as PydanticBaseModel
 
-        class Clue(PydanticBaseModel):
+        class Clue(BaseModel):
             num: int
             clue: str
 
-        class CrosswordClues(PydanticBaseModel):
-            ACROSS: TypingList[Clue]
-            DOWN: TypingList[Clue]
+        class CrosswordClues(BaseModel):
+            ACROSS: List[Clue]
+            DOWN: List[Clue]
 
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
