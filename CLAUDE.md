@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automatically extract the grid and clues via OCR, solve with AI, and play interactively with hints. The pipeline uses OpenCV for grid detection, Gemini 3 Flash for clue extraction (with Mistral as fallback), Claude Opus for solving, and a React frontend for the interactive player.
+Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automatically extract the grid and clues via OCR, solve with AI, and play interactively with hints. The pipeline uses OpenCV for grid detection, Gemini 3 Flash for clue extraction, Claude Opus for solving, and a React frontend for the interactive player.
 
 ## Environment
 
 **Virtual Environment**: Always use the project venv:
 ```bash
-.venv/bin/python3 -m crosswise.solver.solve_puzzle ...
+.venv/bin/python3 -m crosswise.api.server
 ```
 
 ## Dependencies
@@ -24,10 +24,8 @@ Key dependencies:
 - opencv-python, numpy (image processing, grid detection)
 - pydantic, pydantic-settings (data models, config)
 - fastapi, uvicorn (API server)
-- anthropic (Claude candidate generation + hints)
-- google-genai (Gemini 3 Flash OCR — default provider)
-- mistralai (Mistral OCR — fallback provider)
-- openai (legacy/fallback candidate generation)
+- anthropic (Claude candidate generation, solving, hints)
+- google-genai (Gemini 3 Flash OCR)
 - loguru (logging)
 
 ## Architecture
@@ -45,12 +43,6 @@ Key dependencies:
 - Four-point perspective transform for grid warping
 - Contour analysis and quadrilateral extraction
 
-**clue_column_detector.py** - Multi-column layout detection for clue extraction:
-- Hybrid column detection combining vertical projection and text clustering
-- Handles both full-height and partial-height columns
-- Automatic separator line placement between detected columns
-- Optional non-text region masking
-
 **clue_extraction.py** - OCR parsing and puzzle verification:
 - `parse_ocr_markdown()` - Parse OCR markdown output into structured clue data
 - `verify_puzzle()` - Match OCR clues against grid slots, ensure 100% correspondence
@@ -59,20 +51,15 @@ Key dependencies:
 
 ### OCR Integration (`crosswise/ocr/`)
 
-Pluggable OCR provider system — switch with `OCR_PROVIDER=gemini|mistral` in `.env`.
+Pluggable OCR provider system with `OCRProvider` protocol for future extensibility.
 
 **base.py** — `OCRProvider` protocol and `create_ocr_provider()` factory.
 
-**gemini.py** — Gemini 3 Flash provider (default):
+**gemini.py** — Gemini 3 Flash provider:
 - One-shots clue extraction from raw newspaper photos, no preprocessing needed
 - Handles multi-column Sunday-size layouts (142 clues) without masking or separators
 - Uses `google-genai` SDK with structured extraction prompt
 - Requires `GEMINI_API_KEY` environment variable
-
-**mistral.py** — Mistral OCR provider (fallback):
-- Structured output using Pydantic models
-- Works best with preprocessed images (masking + separator lines)
-- Requires `MISTRAL_API_KEY` environment variable
 
 ## Complete Workflow
 
@@ -87,35 +74,20 @@ For extracting crossword clues from newspaper images:
 4. **Build Puzzle**: Use `build_puzzle_clues()` to create structured Clue objects with answer lengths
 5. **Output**: Verified puzzle saved as JSON with grid structure and clue data
 
-### Fallback: Manual Masking (for Mistral provider)
-
-If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mistral`) and use the preprocessing tools:
-- Run `interactive_masker.py` to draw white rectangles over grids/ads and tilted separator lines between columns
-- The tilted separator approach (matching actual column angles) achieved 100% Mistral OCR accuracy on test images
-
 ## Development Notes
 
 - **Git history was scrubbed** with `git filter-repo` to remove ~53MB of binary images (v1 debug PNGs, cell crops, example JPGs). `.git/` went from 49MB → 608K. A pre-filter backup exists locally outside the repo.
 - Image processing uses grayscale conversion with careful handling of both color and grayscale inputs
 - Fallback strategies implemented (adaptive → Otsu thresholding) when component detection fails
-- Aqua/cyan (BGR: 255, 255, 0) used for separator lines — visible over white masks and gray newspaper
-- Interactive masker draws separators at 8px width for clear OCR visibility
 - Grid clue numbers are computed algorithmically (not OCR'd) — more reliable
 - Puzzle verification requires 100% match between OCR clues and grid slots
 
 ### Crossword Solver (`crosswise/solver/`)
 
-**solve_puzzle.py** - Main solver script:
-```bash
-# With TSV database (recommended)
-.venv/bin/python3 -m crosswise.solver.solve_puzzle data/output/puzzle.json --use-database
-
-# Database only (no LLM fallback)
-.venv/bin/python3 -m crosswise.solver.solve_puzzle data/output/puzzle.json --database-only
-
-# LLM only (original behavior)
-.venv/bin/python3 -m crosswise.solver.solve_puzzle data/output/puzzle.json
-```
+**models.py** - Solver data models and JSON builders:
+- `SolverInput`, `SolveResult` — core solver types
+- `build_solver_input_from_json()` — build solver input from puzzle JSON
+- `build_clue_inputs_from_json()` — build candidate generation inputs from puzzle JSON
 
 **clue_database.py** - SQLite-backed clue database:
 - Two data sources: xd TSV (7.5M pairs) + CrosswordQA from HuggingFace (6.8M pairs)
@@ -131,13 +103,11 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 - Fast `contains()` membership testing and `match_pattern()` for pattern matching
 - Quality scores for value ordering in the solver
 
-**candidates/** - Candidate generation package (split from candidate_generator.py):
+**candidates/** - Candidate generation package:
 - `database.py` - `generate_candidates_with_database()`, `regenerate_with_patterns()` — SQLite lookup
 - `claude.py` - `generate_with_claude()`, `ensure_minimum_candidates()`, `generate_with_extended_thinking()` — Claude Opus/Sonnet generation
 - `scoring.py` - `bouncer_filter()`, `categorize_clue()`, `compute_target_domain_size()` — candidate scoring (0.3–1.0)
 - `web_prepass.py` - `web_search_prepass()` — Haiku web search for pop culture clues in parallel
-- `escalation_legacy.py` - `sniper_escalation()` — multi-level fallback (legacy CLI only)
-- `openai_legacy.py` - `generate_candidates_batch()`, `generate_candidates()` — OpenAI functions (legacy CLI only)
 - `models.py` - `ClueInput`, `ScoredCandidate`, `_matches_pattern()` — shared data types
 - `prompts.py` - `_build_prompt()`, `_parse_response()` — shared LLM prompt logic
 
@@ -178,14 +148,6 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 10. CSP cleanup for any remaining unsolved clues
 11. Hint generation runs in parallel after solve
 - **Cost**: ~$1.20/puzzle (down from $5.85), 69/69 solve rate
-
-**Solving Strategy** (CSP solver — legacy):
-1. Database lookup finds ~70% of clues
-2. Claude Opus fallback generates candidates for remaining clues
-3. Bouncer filter scores all candidates by DB/word-index verification
-4. Best-of-3 CSP solve with score-based value ordering
-5. Multi-pass pattern refinement: extract crossing letters → regenerate via DB + Claude → re-solve
-6. Hint generation runs in parallel after solve
 
 ### FastAPI Backend (`crosswise/api/`)
 
@@ -247,8 +209,5 @@ Puzzle JSON stored at `web/public/puzzles/{id}.json`:
 
 ### Environment Variables
 
-- `GEMINI_API_KEY` — Required for Gemini 3 Flash OCR (default provider)
-- `ANTHROPIC_API_KEY` — Required for Claude Opus candidate generation and hints
-- `MISTRAL_API_KEY` — Required if using Mistral OCR provider
-- `OPENAI_API_KEY` — Optional, used by legacy candidate generation functions
-- `OCR_PROVIDER` — `"gemini"` (default) or `"mistral"`
+- `GEMINI_API_KEY` — Required for Gemini 3 Flash OCR
+- `ANTHROPIC_API_KEY` — Required for Claude candidate generation, solving, and hints
