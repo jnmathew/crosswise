@@ -1,19 +1,29 @@
-.PHONY: setup build-db run run-api run-web run-demo help
+.PHONY: setup clean run run-api run-web run-demo help
 
 PYTHON := .venv/bin/python3
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-setup: ## Download all data sources
+setup: ## Download data, build clue DB, clean up (~1.7GB peak, ~1.2GB after)
 	bash scripts/setup_data.sh
-
-build-db: ## Build SQLite clue database from raw sources
 	$(PYTHON) -c "from src.solver.clue_database import ClueDatabase; ClueDatabase()"
+	@echo ""
+	@echo "Cleaning up intermediate files..."
+	rm -rf data/xd data/crosswordqa
+	@echo "Done. Kept: data/clues.db + data/wordlists/"
 
-run: ## Start backend and frontend (requires two terminals)
-	@echo "Terminal 1:  make run-api"
-	@echo "Terminal 2:  make run-web"
+clean: ## Delete clue DB and wordlists (re-run make setup to restore)
+	rm -f data/clues.db
+	rm -rf data/wordlists
+	@echo "Cleaned. Run 'make setup' to rebuild."
+
+run: ## Start backend + frontend (Ctrl+C stops both)
+	@trap "echo; echo Stopping...; kill 0" INT TERM; \
+		echo "Starting API + Web (Ctrl+C to stop both)"; \
+		$(PYTHON) -m src.api.server 2>&1 | sed 's/^/[API] /' & \
+		(cd web && npm run dev) 2>&1 | sed 's/^/[WEB] /' & \
+		wait
 
 run-api: ## Start FastAPI backend
 	$(PYTHON) -m src.api.server
