@@ -131,15 +131,15 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 - Fast `contains()` membership testing and `match_pattern()` for pattern matching
 - Quality scores for value ordering in the solver
 
-**candidate_generator.py** - Candidate generation:
-- `generate_candidates_with_database()` - Database lookup with Claude Opus fallback
-- `generate_with_claude()` - Claude Opus candidate generation
-- `regenerate_with_patterns()` - Pattern-based refinement from crossing letters
-- `bouncer_filter()` - Score candidates by DB/word-index verification (0.3–1.0), +0.1 web confirmation bonus
-- `ensure_minimum_candidates()` - Guarantee >= 5 candidates per clue
-- `sniper_escalation()` - Multi-level escalation ladder when domain hits zero (Sonnet → Opus → word index + ranking)
-- `generate_with_extended_thinking()` - Claude Sonnet 4.5 with thinking enabled for hard/wordplay clues
-- `web_search_prepass()` - Haiku web search for pop culture clues (quotes, proper nouns, media refs) in parallel
+**candidates/** - Candidate generation package (split from candidate_generator.py):
+- `database.py` - `generate_candidates_with_database()`, `regenerate_with_patterns()` — SQLite lookup
+- `claude.py` - `generate_with_claude()`, `ensure_minimum_candidates()`, `generate_with_extended_thinking()` — Claude Opus/Sonnet generation
+- `scoring.py` - `bouncer_filter()`, `categorize_clue()`, `compute_target_domain_size()` — candidate scoring (0.3–1.0)
+- `web_prepass.py` - `web_search_prepass()` — Haiku web search for pop culture clues in parallel
+- `escalation_legacy.py` - `sniper_escalation()` — multi-level fallback (legacy CLI only)
+- `openai_legacy.py` - `generate_candidates_batch()`, `generate_candidates()` — OpenAI functions (legacy CLI only)
+- `models.py` - `ClueInput`, `ScoredCandidate`, `_matches_pattern()` — shared data types
+- `prompts.py` - `_build_prompt()`, `_parse_response()` — shared LLM prompt logic
 
 **csp.py** - Constraint satisfaction solver:
 - MAC (Maintaining Arc Consistency) with `mac_mode="search-only"` (skip AC-3 preprocessing)

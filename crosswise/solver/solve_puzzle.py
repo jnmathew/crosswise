@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from loguru import logger
 
 from crosswise.solver.models import SolverInput
-from crosswise.solver.candidate_generator import (
+from crosswise.solver.candidates import (
     ClueInput,
     ScoredCandidate,
     generate_candidates,

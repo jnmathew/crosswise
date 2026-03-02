@@ -36,7 +36,7 @@ from crosswise.solver.benchmark import (
 from crosswise.solver.puzzles import get_tiny_3x3, get_mini_5x5, get_t_intersection
 
 # Candidate generation
-from crosswise.solver.candidate_generator import (
+from crosswise.solver.candidates import (
     generate_candidates,
     generate_candidates_batch,
     generate_with_extended_thinking,

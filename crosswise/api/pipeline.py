@@ -433,7 +433,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
 
     Returns (candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db).
     """
-    from crosswise.solver.candidate_generator import (
+    from crosswise.solver.candidates import (
         generate_candidates_with_database,
         generate_with_claude,
         bouncer_filter,
@@ -655,7 +655,7 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
 
 def _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir, solve_trace=None, global_trace=None):
     """Build and save per-clue solve diagnostics JSON."""
-    from crosswise.solver.candidate_generator import bouncer_filter
+    from crosswise.solver.candidates import bouncer_filter
 
     final_scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
 
