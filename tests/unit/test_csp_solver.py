@@ -1,9 +1,9 @@
 """Tests for CSP solver."""
 
 import pytest
-from src.solver.csp import solve_csp, CSPSolver
-from src.solver.puzzles import get_tiny_3x3, get_mini_5x5, get_t_intersection
-from src.solver.models import SolverInput
+from crosswise.solver.csp import solve_csp, CSPSolver
+from crosswise.solver.puzzles import get_tiny_3x3, get_mini_5x5, get_t_intersection
+from crosswise.solver.models import SolverInput
 
 
 class TestCSPSolverTiny3x3:

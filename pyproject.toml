@@ -1,0 +1,12 @@
+[project]
+name = "crosswise"
+version = "0.1.0"
+description = "Crossword OCR + AI Solver with Interactive Player"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["crosswise*"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

@@ -18,7 +18,7 @@ from loguru import logger
 from openai import OpenAI
 
 if TYPE_CHECKING:
-    from src.solver.clue_database import ClueDatabase
+    from crosswise.solver.clue_database import ClueDatabase
 
 # Load environment variables from .env
 load_dotenv()
@@ -349,7 +349,7 @@ def web_search_prepass(
     Returns:
         Dict mapping clue_id to a single web-verified candidate answer (uppercase).
     """
-    from src.solver.cost_tracker import get_tracker
+    from crosswise.solver.cost_tracker import get_tracker
 
     pop_clues = [c for c in clues if _is_pop_culture_clue(c.text)]
     if not pop_clues:
@@ -862,7 +862,7 @@ Respond with ONLY a JSON object mapping clue_id to an array of answers.
 Example: {{"1-across": ["PARIS", "LYONS"], "2-down": ["ECHO", "ARIA"]}}"""
 
         try:
-            from src.solver.cost_tracker import get_tracker
+            from crosswise.solver.cost_tracker import get_tracker
 
             response = client.messages.create(
                 model=model,

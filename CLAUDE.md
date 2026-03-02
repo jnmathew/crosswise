@@ -10,7 +10,7 @@ Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automa
 
 **Virtual Environment**: Always use the project venv:
 ```bash
-.venv/bin/python3 -m src.solver.solve_puzzle ...
+.venv/bin/python3 -m crosswise.solver.solve_puzzle ...
 ```
 
 ## Dependencies
@@ -32,7 +32,7 @@ Key dependencies:
 
 ## Architecture
 
-### Grid Detection (`src/core/`)
+### Grid Detection (`crosswise/core/`)
 
 **grid_detection.py** - Crossword grid extraction from newspaper images:
 - Adaptive threshold selection with multiple fallback strategies (gap, percentile, Otsu)
@@ -57,24 +57,7 @@ Key dependencies:
 - `match_clues_to_slots()` - Pair each OCR clue with its grid position and answer length
 - `build_puzzle_clues()` - Create structured Clue objects for the Puzzle model
 
-### Interactive Tools (`src/tools/`)
-
-**interactive_masker.py** - GUI tool for manual preprocessing:
-- MASK mode: Draw white rectangles over unwanted areas (grids, ads, acrostics)
-- SEPARATOR mode: Click two points to draw tilted separator lines matching column angles
-- Save/load coordinates as JSON for reproducible preprocessing
-- Press 'v' to toggle modes, 's' to save, 'u' to undo, 'c' to clear
-- Separator width: 8px for clear OCR guidance
-
-**process_masked_image.py** - Automated post-masking pipeline:
-- Loads manually masked images
-- Applies automatic column detection if needed
-- Draws separator lines and saves preprocessed images
-- Optional OCR integration with `--run-ocr` flag (uses configured provider)
-
-See `docs/COLUMN_DETECTION_WORKFLOW.md` for complete usage guide.
-
-### OCR Integration (`src/ocr/`)
+### OCR Integration (`crosswise/ocr/`)
 
 Pluggable OCR provider system — switch with `OCR_PROVIDER=gemini|mistral` in `.env`.
 
@@ -120,18 +103,18 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 - Grid clue numbers are computed algorithmically (not OCR'd) — more reliable
 - Puzzle verification requires 100% match between OCR clues and grid slots
 
-### Crossword Solver (`src/solver/`)
+### Crossword Solver (`crosswise/solver/`)
 
 **solve_puzzle.py** - Main solver script:
 ```bash
 # With TSV database (recommended)
-.venv/bin/python3 -m src.solver.solve_puzzle data/output/puzzle.json --use-database
+.venv/bin/python3 -m crosswise.solver.solve_puzzle data/output/puzzle.json --use-database
 
 # Database only (no LLM fallback)
-.venv/bin/python3 -m src.solver.solve_puzzle data/output/puzzle.json --database-only
+.venv/bin/python3 -m crosswise.solver.solve_puzzle data/output/puzzle.json --database-only
 
 # LLM only (original behavior)
-.venv/bin/python3 -m src.solver.solve_puzzle data/output/puzzle.json
+.venv/bin/python3 -m crosswise.solver.solve_puzzle data/output/puzzle.json
 ```
 
 **clue_database.py** - SQLite-backed clue database:
@@ -204,7 +187,7 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 5. Multi-pass pattern refinement: extract crossing letters → regenerate via DB + Claude → re-solve
 6. Hint generation runs in parallel after solve
 
-### FastAPI Backend (`src/api/`)
+### FastAPI Backend (`crosswise/api/`)
 
 **server.py** - API endpoints:
 - `POST /api/upload` — Photo upload, grid detection, perspective warp
@@ -241,7 +224,7 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 **Running the app:**
 ```bash
 # Terminal 1: Backend
-.venv/bin/python3 -m src.api.server
+.venv/bin/python3 -m crosswise.api.server
 
 # Terminal 2: Frontend
 cd web && npm run dev

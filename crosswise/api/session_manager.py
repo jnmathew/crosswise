@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from src.api.models import SessionStatus
+from crosswise.api.models import SessionStatus
 
 
 class SessionManager:

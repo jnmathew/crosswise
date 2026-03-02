@@ -8,9 +8,9 @@ import pytest
 import numpy as np
 from pathlib import Path
 
-from src.core.config import Settings
-from src.core.image_preprocessing import preprocess
-from src.core.grid_detection import detect_grid
+from crosswise.core.config import Settings
+from crosswise.core.image_preprocessing import preprocess
+from crosswise.core.grid_detection import detect_grid
 
 
 # Test image parameters: (image_path_relative, expected_rows, expected_cols)

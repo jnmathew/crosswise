@@ -3,7 +3,7 @@ Toy puzzles for testing crossword solvers.
 """
 
 from typing import Dict, List, Tuple
-from src.solver.models import SolverInput
+from crosswise.solver.models import SolverInput
 
 
 def get_tiny_3x3() -> Tuple[SolverInput, Dict[str, List[str]]]:

@@ -54,7 +54,7 @@ Clues:
 
 Respond with ONLY the JSON array, no other text."""
 
-    from src.solver.cost_tracker import get_tracker
+    from crosswise.solver.cost_tracker import get_tracker
 
     client = anthropic.Anthropic()
     response = client.messages.create(

@@ -11,8 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
 
-from src.core.config import settings
-from src.api.models import (
+from crosswise.core.config import settings
+from crosswise.api.models import (
     SessionStatus,
     UploadResponse,
     MaskRequest,
@@ -25,8 +25,8 @@ from src.api.models import (
     GridResizeResponse,
     ManualCropRequest,
 )
-from src.api.session_manager import SessionManager
-from src.api import pipeline
+from crosswise.api.session_manager import SessionManager
+from crosswise.api import pipeline
 
 SESSIONS_DIR = settings.DATA_DIR / "sessions"
 PUZZLES_DIR = Path(__file__).parent.parent.parent / "web" / "public" / "puzzles"
@@ -362,7 +362,7 @@ async def update_puzzle(puzzle_id: str, body: dict):
 
 def main():
     uvicorn.run(
-        "src.api.server:app",
+        "crosswise.api.server:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=True,

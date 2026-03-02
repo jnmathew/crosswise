@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from src.solver.candidate_generator import (
+from crosswise.solver.candidate_generator import (
     ClueInput,
     generate_candidates,
     generate_candidates_batch,
@@ -82,7 +82,7 @@ class TestParseResponse:
 class TestGenerateCandidatesBatch:
     """Test batch candidate generation."""
 
-    @patch("src.solver.candidate_generator.OpenAI")
+    @patch("crosswise.solver.candidate_generator.OpenAI")
     def test_calls_api_with_prompt(self, mock_openai_class):
         """Should call OpenAI API with correct prompt."""
         # Setup mock
@@ -116,7 +116,7 @@ class TestGenerateCandidatesBatch:
 class TestGenerateCandidates:
     """Test batched candidate generation."""
 
-    @patch("src.solver.candidate_generator.generate_candidates_batch")
+    @patch("crosswise.solver.candidate_generator.generate_candidates_batch")
     def test_batches_clues(self, mock_batch):
         """Should batch clues according to batch_size."""
         mock_batch.return_value = {}
@@ -131,7 +131,7 @@ class TestGenerateCandidates:
         # Should have 3 batches: 30 + 30 + 15
         assert mock_batch.call_count == 3
 
-    @patch("src.solver.candidate_generator.generate_candidates_batch")
+    @patch("crosswise.solver.candidate_generator.generate_candidates_batch")
     def test_combines_batch_results(self, mock_batch):
         """Should combine results from all batches."""
         mock_batch.side_effect = [
@@ -149,7 +149,7 @@ class TestGenerateCandidates:
         assert result["1-across"] == ["WORD"]
         assert result["2-across"] == ["TEST"]
 
-    @patch("src.solver.candidate_generator.generate_candidates_batch")
+    @patch("crosswise.solver.candidate_generator.generate_candidates_batch")
     def test_callback_called_per_batch(self, mock_batch):
         """Should call progress callback for each batch."""
         mock_batch.return_value = {}

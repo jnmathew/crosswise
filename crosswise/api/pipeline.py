@@ -21,8 +21,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.core.config import Settings
-from src.api.models import MaskRequest, SolveProgress, SessionStatus
+from crosswise.core.config import Settings
+from crosswise.api.models import MaskRequest, SolveProgress, SessionStatus
 
 
 class SolveCancelled(Exception):
@@ -80,8 +80,8 @@ def run_grid_detection(
         manual_quad: Optional user-specified quad corners (list of [x, y] pairs).
                      If provided, uses these instead of auto-detection.
     """
-    from src.core.image_preprocessing import preprocess
-    from src.core.grid_detection import detect_grid, assign_clue_numbers, compute_clue_slots
+    from crosswise.core.image_preprocessing import preprocess
+    from crosswise.core.grid_detection import detect_grid, assign_clue_numbers, compute_clue_slots
 
     original_path = session_dir / "original.jpg"
 
@@ -108,8 +108,8 @@ def run_grid_detection(
 
 def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[str, Any]:
     """Recompute grid clue numbers and slots from user-edited black cell map."""
-    from src.core.grid_detection import assign_clue_numbers, compute_clue_slots
-    from src.core.models import Cell
+    from crosswise.core.grid_detection import assign_clue_numbers, compute_clue_slots
+    from crosswise.core.models import Cell
 
     rows = len(black_cells)
     cols = len(black_cells[0]) if rows > 0 else 0
@@ -140,7 +140,7 @@ def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[st
 
 def resize_grid(session_dir: Path, rows: int, cols: int) -> Dict[str, Any]:
     """Re-detect black cells at new grid dimensions using evenly-spaced lines."""
-    from src.core.grid_detection import classify_black_cells, assign_clue_numbers, compute_clue_slots
+    from crosswise.core.grid_detection import classify_black_cells, assign_clue_numbers, compute_clue_slots
 
     warped_path = session_dir / "warped_gray.jpg"
     warped_gray = cv2.imread(str(warped_path), cv2.IMREAD_GRAYSCALE)
@@ -183,7 +183,7 @@ def apply_masks(image: np.ndarray, mask: MaskRequest) -> np.ndarray:
 
 def run_ocr_and_verify(session_dir: Path, mask: MaskRequest, config: Settings) -> Dict[str, Any]:
     """Phase 2: Apply masks, run OCR, verify against grid."""
-    from src.core.clue_extraction import parse_ocr_markdown, verify_puzzle
+    from crosswise.core.clue_extraction import parse_ocr_markdown, verify_puzzle
 
     # Load original image and apply masks
     original = cv2.imread(str(session_dir / "original.jpg"))
@@ -191,7 +191,7 @@ def run_ocr_and_verify(session_dir: Path, mask: MaskRequest, config: Settings) -
     cv2.imwrite(str(session_dir / "masked.jpg"), masked)
 
     # Run OCR
-    from src.ocr.base import create_ocr_provider
+    from crosswise.ocr.base import create_ocr_provider
 
     ocr_provider = create_ocr_provider(config)
     ocr_markdown = ocr_provider.extract_clues(session_dir / "masked.jpg")
@@ -433,7 +433,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
 
     Returns (candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db).
     """
-    from src.solver.candidate_generator import (
+    from crosswise.solver.candidate_generator import (
         generate_candidates_with_database,
         generate_with_claude,
         bouncer_filter,
@@ -441,7 +441,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
         to_score_map,
         web_search_prepass,
     )
-    from src.solver.clue_database import ClueDatabase
+    from crosswise.solver.clue_database import ClueDatabase
 
     # Build clue text lookup for bouncer filter
     clue_text_lookup = {}
@@ -597,8 +597,8 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
 
     Returns (assignment, solved_count).
     """
-    from src.solver.llm_solver import solve_with_llm
-    from src.solver.csp import solve_csp
+    from crosswise.solver.llm_solver import solve_with_llm
+    from crosswise.solver.csp import solve_csp
 
     _check_cancel(cancel_event)
     logger.info(f"{_elapsed()} Starting LLM iterative solver")
@@ -655,7 +655,7 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
 
 def _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir, solve_trace=None, global_trace=None):
     """Build and save per-clue solve diagnostics JSON."""
-    from src.solver.candidate_generator import bouncer_filter
+    from crosswise.solver.candidate_generator import bouncer_filter
 
     final_scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
 
@@ -706,7 +706,7 @@ def _generate_and_apply_hints(puzzle_data, assignment, put_progress, _elapsed):
 
     Returns list of solved clue dicts.
     """
-    from src.solver.generate_hints import generate_hints_batch
+    from crosswise.solver.generate_hints import generate_hints_batch
 
     solved_clues = []
     for direction in ("across", "down"):
@@ -769,8 +769,8 @@ def _run_solve(
     cancel_event: Optional[threading.Event] = None,
 ):
     """Orchestrate the full solve pipeline: candidates -> solve -> diagnostics -> hints."""
-    from src.solver.solve_puzzle import build_solver_input_from_json, build_clue_inputs_from_json
-    from src.solver.cost_tracker import reset_tracker
+    from crosswise.solver.solve_puzzle import build_solver_input_from_json, build_clue_inputs_from_json
+    from crosswise.solver.cost_tracker import reset_tracker
 
     _t0 = time.time()
     def _elapsed():

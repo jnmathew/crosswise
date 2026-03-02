@@ -1,7 +1,7 @@
 """Tests for solver models."""
 
 import pytest
-from src.solver.models import SolverInput, SolveResult
+from crosswise.solver.models import SolverInput, SolveResult
 
 
 class TestSolverInput:

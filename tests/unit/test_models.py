@@ -1,6 +1,6 @@
 """Test data models."""
 import pytest
-from src.core.models import Cell, Clue, Direction
+from crosswise.core.models import Cell, Clue, Direction
 
 
 class TestCell:

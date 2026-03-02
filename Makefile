@@ -7,7 +7,7 @@ help: ## Show available commands
 
 setup: ## Download data, build clue DB, clean up (~1.7GB peak, ~1.2GB after)
 	bash scripts/setup_data.sh
-	$(PYTHON) -c "from src.solver.clue_database import ClueDatabase; ClueDatabase()"
+	$(PYTHON) -c "from crosswise.solver.clue_database import ClueDatabase; ClueDatabase()"
 	@echo ""
 	@echo "Cleaning up intermediate files..."
 	rm -rf data/xd data/crosswordqa
@@ -21,15 +21,15 @@ clean: ## Delete clue DB and wordlists (re-run make setup to restore)
 run: ## Start backend + frontend (Ctrl+C stops both)
 	@trap "echo; echo Stopping...; kill 0" INT TERM; \
 		echo "Starting API + Web (Ctrl+C to stop both)"; \
-		$(PYTHON) -m src.api.server 2>&1 | sed 's/^/[API] /' & \
+		$(PYTHON) -m crosswise.api.server 2>&1 | sed 's/^/[API] /' & \
 		(cd web && npm run dev) 2>&1 | sed 's/^/[WEB] /' & \
 		wait
 
 run-api: ## Start FastAPI backend
-	$(PYTHON) -m src.api.server
+	$(PYTHON) -m crosswise.api.server
 
 run-web: ## Start React dev server
 	cd web && npm run dev
 
 run-demo: ## Verify solver can load DB and generate candidates
-	$(PYTHON) -c "from src.solver.clue_database import ClueDatabase; db = ClueDatabase(); r1 = db.lookup_by_clue('Prefix with space', 4); r2 = db.lookup_by_pattern('_A_'); print(f'DB loaded — 10M+ entries'); print(f'  clue lookup [Prefix with space, 4]: {r1[:3]}'); print(f'  pattern match [_A_]: {r2[:5]}'); db.close(); print('Demo complete.')"
+	$(PYTHON) -c "from crosswise.solver.clue_database import ClueDatabase; db = ClueDatabase(); r1 = db.lookup_by_clue('Prefix with space', 4); r2 = db.lookup_by_pattern('_A_'); print(f'DB loaded — 10M+ entries'); print(f'  clue lookup [Prefix with space, 4]: {r1[:3]}'); print(f'  pattern match [_A_]: {r2[:5]}'); db.close(); print('Demo complete.')"

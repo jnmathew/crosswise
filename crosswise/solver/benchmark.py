@@ -5,8 +5,8 @@ Benchmark harness for testing crossword solver.
 import statistics
 from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from src.solver.models import SolverInput, SolveResult
-from src.solver.csp import solve_csp
+from crosswise.solver.models import SolverInput, SolveResult
+from crosswise.solver.csp import solve_csp
 
 
 ClueId = str

@@ -12,8 +12,8 @@ from typing import Dict, List, Optional, Tuple, Any
 
 from loguru import logger
 
-from src.solver.models import SolverInput
-from src.solver.candidate_generator import (
+from crosswise.solver.models import SolverInput
+from crosswise.solver.candidate_generator import (
     ClueInput,
     ScoredCandidate,
     generate_candidates,
@@ -31,8 +31,8 @@ from src.solver.candidate_generator import (
     generate_with_extended_thinking,
     DEFAULT_MIN_CANDIDATES,
 )
-from src.solver.csp import solve_csp, extract_letter_patterns
-from src.solver.benchmark import verify_solution
+from crosswise.solver.csp import solve_csp, extract_letter_patterns
+from crosswise.solver.benchmark import verify_solution
 
 
 def load_puzzle_json(puzzle_path: str) -> Dict[str, Any]:
@@ -293,14 +293,14 @@ def solve_puzzle(
     # Initialize database if requested
     db = None
     if use_database:
-        from src.solver.clue_database import ClueDatabase
+        from crosswise.solver.clue_database import ClueDatabase
         logger.info("Initializing clue database...")
         db = ClueDatabase()
 
     # Initialize word index (graceful degradation if files missing)
     word_index = None
     try:
-        from src.solver.word_index import WordIndex
+        from crosswise.solver.word_index import WordIndex
         logger.info("Initializing word index...")
         word_index = WordIndex()
         if word_index.size == 0:

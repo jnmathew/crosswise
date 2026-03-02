@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import anthropic
 from loguru import logger
 
-from src.solver.models import SolverInput
+from crosswise.solver.models import SolverInput
 
 
 # Type aliases
@@ -297,7 +297,7 @@ Return a JSON object mapping clue_id to answer for ONLY the clues you're confide
 Example: {{"14-across": "DEUS", "8-across": "APSE"}}
 Return ONLY the JSON object, no other text. If you're not confident about any, return {{}}."""
 
-    from src.solver.cost_tracker import get_tracker
+    from crosswise.solver.cost_tracker import get_tracker
 
     client = anthropic.Anthropic()
 
@@ -371,7 +371,7 @@ def find_conflict_clusters(
     trace back to the committed crossing answers that created the impossible
     pattern. Group connected dead-ends into clusters for joint resolution.
     """
-    from src.solver.word_index import WordIndex
+    from crosswise.solver.word_index import WordIndex
     word_index = WordIndex()
 
     unsolved = [cid for cid in solver_input.clue_cells if cid not in assignment]
@@ -580,7 +580,7 @@ Return a JSON object with answers for ALL clues in this cluster (both the blamed
 Example: {{"9-down": "PEPO", "17-across": "OPEN"}}
 Return ONLY the JSON object."""
 
-    from src.solver.cost_tracker import get_tracker
+    from crosswise.solver.cost_tracker import get_tracker
 
     client = anthropic.Anthropic()
 
@@ -752,7 +752,7 @@ def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
 
     try:
         import anthropic
-        from src.solver.cost_tracker import get_tracker
+        from crosswise.solver.cost_tracker import get_tracker
 
         client = anthropic.Anthropic(api_key=api_key)
 
@@ -808,7 +808,7 @@ def propagate_constraints(
     Returns:
         Dict of newly committed clue_id -> word (subset added to assignment).
     """
-    from src.solver.word_index import WordIndex
+    from crosswise.solver.word_index import WordIndex
     word_index = WordIndex()
 
     new_commits: Dict[ClueId, Word] = {}

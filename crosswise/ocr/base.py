@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from src.core.config import Settings
+from crosswise.core.config import Settings
 
 
 @runtime_checkable
@@ -33,14 +33,14 @@ def create_ocr_provider(config: Settings) -> OCRProvider:
     provider = config.OCR_PROVIDER
 
     if provider == "mistral":
-        from src.ocr.mistral import MistralOCRProvider
+        from crosswise.ocr.mistral import MistralOCRProvider
 
         return MistralOCRProvider(
             api_key=config.MISTRAL_API_KEY,
             model=config.MISTRAL_OCR_MODEL,
         )
     elif provider == "gemini":
-        from src.ocr.gemini import GeminiOCRProvider
+        from crosswise.ocr.gemini import GeminiOCRProvider
 
         return GeminiOCRProvider(
             api_key=config.GEMINI_API_KEY,

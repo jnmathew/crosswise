@@ -14,7 +14,7 @@ import time
 from collections import deque
 from typing import Dict, List, Tuple, Optional, Set
 from loguru import logger
-from src.solver.models import SolverInput, SolveResult
+from crosswise.solver.models import SolverInput, SolveResult
 
 
 # Type aliases for clarity
