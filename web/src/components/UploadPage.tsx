@@ -17,7 +17,7 @@ const STEP_LABELS: Record<Step, string> = {
 
 export default function UploadPage() {
   const navigate = useNavigate();
-  const { uploadPhoto, submitGridEdit, submitMask, startPipeline, submitManualCrop } = useUploadPipeline();
+  const { uploadPhoto, submitGridEdit, startPipeline, submitManualCrop } = useUploadPipeline();
 
   const [step, setStep] = useState<Step>('upload');
   const [uploading, setUploading] = useState(false);

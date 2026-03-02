@@ -1,4 +1,4 @@
-.PHONY: setup clean run run-api run-web run-demo help
+.PHONY: setup clean run run-api run-web run-demo test help
 
 PYTHON := .venv/bin/python3
 
@@ -30,6 +30,9 @@ run-api: ## Start FastAPI backend
 
 run-web: ## Start React dev server
 	cd web && npm run dev
+
+test: ## Run all tests
+	$(PYTHON) -m pytest tests/ -v
 
 run-demo: ## Verify solver can load DB and generate candidates
 	$(PYTHON) -c "from crosswise.solver.clue_database import ClueDatabase; db = ClueDatabase(); r1 = db.lookup_by_clue('Prefix with space', 4); r2 = db.lookup_by_pattern('_A_'); print(f'DB loaded — 10M+ entries'); print(f'  clue lookup [Prefix with space, 4]: {r1[:3]}'); print(f'  pattern match [_A_]: {r2[:5]}'); db.close(); print('Demo complete.')"
