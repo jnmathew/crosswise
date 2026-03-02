@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Crossword OCR + AI Solver with Interactive Player"
 requires-python = ">=3.11"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.setuptools.packages.find]
 include = ["crosswise*"]
 
