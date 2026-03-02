@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from crosswise.core.config import Settings
+from crosswise.config import Settings
 from crosswise.api.models import MaskRequest, SolveProgress, SessionStatus
 
 
@@ -80,8 +80,8 @@ def run_grid_detection(
         manual_quad: Optional user-specified quad corners (list of [x, y] pairs).
                      If provided, uses these instead of auto-detection.
     """
-    from crosswise.core.image_preprocessing import preprocess
-    from crosswise.core.grid_detection import detect_grid, assign_clue_numbers, compute_clue_slots
+    from crosswise.vision.image_preprocessing import preprocess
+    from crosswise.vision.grid_detection import detect_grid, assign_clue_numbers, compute_clue_slots
 
     original_path = session_dir / "original.jpg"
 
@@ -108,8 +108,8 @@ def run_grid_detection(
 
 def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[str, Any]:
     """Recompute grid clue numbers and slots from user-edited black cell map."""
-    from crosswise.core.grid_detection import assign_clue_numbers, compute_clue_slots
-    from crosswise.core.models import Cell
+    from crosswise.vision.grid_detection import assign_clue_numbers, compute_clue_slots
+    from crosswise.models import Cell
 
     rows = len(black_cells)
     cols = len(black_cells[0]) if rows > 0 else 0
@@ -140,7 +140,7 @@ def apply_grid_edit(session_dir: Path, black_cells: list[list[bool]]) -> Dict[st
 
 def resize_grid(session_dir: Path, rows: int, cols: int) -> Dict[str, Any]:
     """Re-detect black cells at new grid dimensions using evenly-spaced lines."""
-    from crosswise.core.grid_detection import classify_black_cells, assign_clue_numbers, compute_clue_slots
+    from crosswise.vision.grid_detection import classify_black_cells, assign_clue_numbers, compute_clue_slots
 
     warped_path = session_dir / "warped_gray.jpg"
     warped_gray = cv2.imread(str(warped_path), cv2.IMREAD_GRAYSCALE)
@@ -183,7 +183,7 @@ def apply_masks(image: np.ndarray, mask: MaskRequest) -> np.ndarray:
 
 def run_ocr_and_verify(session_dir: Path, mask: MaskRequest, config: Settings) -> Dict[str, Any]:
     """Phase 2: Apply masks, run OCR, verify against grid."""
-    from crosswise.core.clue_extraction import parse_ocr_markdown, verify_puzzle
+    from crosswise.vision.clue_extraction import parse_ocr_markdown, verify_puzzle
 
     # Load original image and apply masks
     original = cv2.imread(str(session_dir / "original.jpg"))

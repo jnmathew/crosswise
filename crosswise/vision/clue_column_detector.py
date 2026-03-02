@@ -12,7 +12,7 @@ Pipeline:
 4. Draw vertical separator lines at column boundaries
 5. Optional masking of non-text regions (ads, images, etc.)
 """
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 import cv2
 import numpy as np
 from loguru import logger

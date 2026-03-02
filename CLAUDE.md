@@ -32,7 +32,7 @@ Key dependencies:
 
 ## Architecture
 
-### Grid Detection (`crosswise/core/`)
+### Grid Detection (`crosswise/vision/`)
 
 **grid_detection.py** - Crossword grid extraction from newspaper images:
 - Adaptive threshold selection with multiple fallback strategies (gap, percentile, Otsu)
@@ -198,7 +198,7 @@ If Gemini struggles with a particular image, switch to Mistral (`OCR_PROVIDER=mi
 - `GET /api/puzzles` — List available puzzles
 - `PATCH /api/puzzles/{id}` — Update puzzle metadata (e.g. name)
 
-**pipeline.py** - Orchestration wrapping core functions:
+**pipeline.py** - Orchestration wrapping vision/solver functions:
 - `run_grid_detection()` — Preprocess + detect grid
 - `run_ocr_and_verify()` — Mask application + OCR (via configured provider) + verification
 - `run_solve_background()` — Background solve with progress callbacks

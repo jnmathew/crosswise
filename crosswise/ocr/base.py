@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from crosswise.core.config import Settings
+from crosswise.config import Settings
 
 
 @runtime_checkable

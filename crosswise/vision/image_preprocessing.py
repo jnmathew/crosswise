@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 from loguru import logger
 
-from .config import Settings
+from crosswise.config import Settings
 
 
 def load_image(path: Path) -> np.ndarray:

@@ -13,8 +13,8 @@ import cv2
 import numpy as np
 from loguru import logger
 
-from .config import Settings
-from .models import Cell
+from crosswise.config import Settings
+from crosswise.models import Cell
 
 
 def _smooth1d(arr: np.ndarray, k: int) -> np.ndarray:

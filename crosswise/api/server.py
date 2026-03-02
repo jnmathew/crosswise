@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
 
-from crosswise.core.config import settings
+from crosswise.config import settings
 from crosswise.api.models import (
     SessionStatus,
     UploadResponse,

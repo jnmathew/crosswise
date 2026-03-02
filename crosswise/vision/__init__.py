@@ -1,4 +1,4 @@
-"""Core pipeline modules."""
+"""Vision modules: grid detection, image preprocessing, clue extraction."""
 
 from . import (
     image_preprocessing,

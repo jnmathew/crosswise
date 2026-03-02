@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from .models import Clue, Direction
+from crosswise.models import Clue, Direction
 
 
 def parse_ocr_markdown(text: str) -> Tuple[List[Dict], List[str]]:
