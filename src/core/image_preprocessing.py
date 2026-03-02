@@ -691,10 +691,26 @@ def preprocess(input_path: Path, config: Settings, manual_quad: Optional[np.ndar
 
     # Find puzzle quad (use manual if provided, otherwise auto-detect)
     if manual_quad is not None:
-        quad = manual_quad
+        # Scale quad coordinates from original image space to resized image space
+        h_orig, w_orig = image.shape[:2]
+        h_resized, w_resized = original.shape[:2]
+        if (h_orig, w_orig) != (h_resized, w_resized):
+            scale_x = w_resized / w_orig
+            scale_y = h_resized / h_orig
+            manual_quad = manual_quad.copy()
+            manual_quad[:, 0] *= scale_x
+            manual_quad[:, 1] *= scale_y
+            logger.info(f"Scaled manual quad from {w_orig}x{h_orig} to {w_resized}x{h_resized}")
+        # Refine: snap to actual grid edges using Hough line detection
+        refined = find_quad_with_hough(original, approx_quad=manual_quad)
+        if refined is not None:
+            quad = refined
+            logger.info("Refined manual quad with Hough line detection")
+        else:
+            quad = manual_quad
+            logger.info("Hough refinement failed, using raw manual quad")
         gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
         edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
-        logger.info("Using manually specified quad corners")
     else:
         quad, gray, edged = find_largest_quad(original)
         if quad is None:
