@@ -1,6 +1,5 @@
 """Google Gemini vision provider for crossword clue extraction."""
 
-import base64
 import json
 import os
 import re
@@ -9,9 +8,7 @@ from pathlib import Path
 EXTRACTION_PROMPT = """\
 You are a precision OCR system for extracting crossword puzzle clues from newspaper photographs.
 
-The image shows crossword clues arranged in newspaper columns. It may have been preprocessed:
-- White rectangles mask out the crossword grid and irrelevant content (ads, other puzzles)
-- Cyan/aqua lines separate the clue columns — read columns left to right
+The image shows crossword clues arranged in newspaper columns.
 
 Extract every clue exactly as printed. Rules:
 1. Read columns LEFT to RIGHT, top to bottom within each column
