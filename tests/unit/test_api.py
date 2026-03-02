@@ -67,7 +67,7 @@ class TestGetConfig:
         assert resp.status_code == 200
         data = resp.json()
         assert "ocr_provider" in data
-        assert data["ocr_provider"] in ("gemini", "mistral")
+        assert data["ocr_provider"] == "gemini"
 
 
 class TestListPuzzles:

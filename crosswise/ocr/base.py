@@ -32,14 +32,7 @@ def create_ocr_provider(config: Settings) -> OCRProvider:
     """Instantiate an OCR provider based on config."""
     provider = config.OCR_PROVIDER
 
-    if provider == "mistral":
-        from crosswise.ocr.mistral import MistralOCRProvider
-
-        return MistralOCRProvider(
-            api_key=config.MISTRAL_API_KEY,
-            model=config.MISTRAL_OCR_MODEL,
-        )
-    elif provider == "gemini":
+    if provider == "gemini":
         from crosswise.ocr.gemini import GeminiOCRProvider
 
         return GeminiOCRProvider(
@@ -48,5 +41,5 @@ def create_ocr_provider(config: Settings) -> OCRProvider:
         )
     else:
         raise ValueError(
-            f"Unknown OCR provider: {provider!r}. Choose 'gemini' or 'mistral'."
+            f"Unknown OCR provider: {provider!r}. Currently only 'gemini' is supported."
         )

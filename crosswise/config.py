@@ -23,9 +23,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     # OCR Provider
-    OCR_PROVIDER: str = "gemini"  # "gemini" or "mistral"
-    MISTRAL_API_KEY: str = ""
-    MISTRAL_OCR_MODEL: str = "mistral-ocr-latest"
+    OCR_PROVIDER: str = "gemini"
     GEMINI_API_KEY: str = ""
     GEMINI_OCR_MODEL: str = "gemini-3-flash-preview"
 
