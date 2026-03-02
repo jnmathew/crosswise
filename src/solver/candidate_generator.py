@@ -548,6 +548,37 @@ def _is_pop_culture_clue(text: str) -> bool:
     return False
 
 
+def _extract_answer(raw: str, expected_length: int) -> Optional[str]:
+    """Extract a valid answer from Haiku's response text.
+
+    Handles common response formats:
+    - "SAM" (clean)
+    - "The answer is SAM." (extra text)
+    - "SAM (Sam Snead)" (parenthetical)
+    - "**SAM**" (markdown bold)
+    """
+    # Clean up markdown bold
+    cleaned = raw.replace("**", "").replace("*", "").strip()
+
+    # Try 1: the whole response after basic cleanup
+    simple = cleaned.strip('"\'.,!? ').replace(" ", "").upper()
+    if len(simple) == expected_length and simple.isalpha():
+        return simple
+
+    # Try 2: find all-caps words of the right length (strongest signal)
+    words = re.findall(r'[A-Za-z]+', cleaned)
+    for w in words:
+        if len(w) == expected_length and w.isupper():
+            return w
+
+    # Try 3: scan from the end — answers tend to be the last meaningful word
+    for w in reversed(words):
+        if len(w) == expected_length:
+            return w.upper()
+
+    return None
+
+
 def web_search_prepass(
     clues: List[ClueInput],
 ) -> Dict[str, str]:
@@ -589,8 +620,8 @@ def web_search_prepass(
 
             prompt = (
                 f'Crossword clue: "{clue.text}" ({clue.length} letters)\n\n'
-                f'What is the answer? If you are unsure, use web search to verify. '
-                f'Reply with ONLY the answer in uppercase, nothing else.'
+                f'Use web search to find the answer, then reply with ONLY '
+                f'the {clue.length}-letter answer in uppercase. Nothing else.'
             )
 
             tools = [{
@@ -603,36 +634,40 @@ def web_search_prepass(
 
             response = client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=100,
+                max_tokens=200,
                 messages=messages,
                 tools=tools,
             )
-            tracker.track(response, f"web_prepass", model="claude-haiku-4-5-20251001")
+            tracker.track(response, "web_prepass", model="claude-haiku-4-5-20251001")
 
-            # Handle pause_turn (1 continuation max for search results)
-            if response.stop_reason == "pause_turn":
+            # Handle pause_turn — follow up until we get a final answer (max 3 continuations)
+            for _ in range(3):
+                if response.stop_reason != "pause_turn":
+                    break
                 messages.append({"role": "assistant", "content": response.content})
-                messages.append({"role": "user", "content": "Reply with ONLY the answer in uppercase."})
+                messages.append({"role": "user", "content": f"Reply with ONLY the {clue.length}-letter answer in uppercase."})
                 response = client.messages.create(
                     model="claude-haiku-4-5-20251001",
-                    max_tokens=100,
+                    max_tokens=200,
                     messages=messages,
                     tools=tools,
                 )
-                tracker.track(response, f"web_prepass_cont", model="claude-haiku-4-5-20251001")
+                tracker.track(response, "web_prepass_cont", model="claude-haiku-4-5-20251001")
 
             # Extract answer from response
             text_parts = [b.text for b in response.content if hasattr(b, "text")]
-            answer = "".join(text_parts).strip().upper()
-            # Clean up — remove quotes, periods, extra whitespace
-            answer = answer.strip('"\'.,!? ').replace(" ", "")
+            raw = "".join(text_parts).strip()
 
-            if len(answer) == clue.length and answer.isalpha():
+            # Try to extract a word of the right length from the response
+            answer = _extract_answer(raw, clue.length)
+            if answer:
                 return (clue.clue_id, answer)
+
+            logger.debug(f"Web pre-pass {clue.clue_id}: no valid {clue.length}-letter answer from: {raw!r}")
             return None
 
         except Exception as e:
-            # Silently skip failures (rate limits, network errors)
+            logger.warning(f"Web pre-pass {clue.clue_id} failed: {e}")
             return None
 
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -752,8 +787,8 @@ def bouncer_filter(
                     # Check if this specific clue-answer pair exists in DB
                     if is_in_db and clue_text:
                         cursor2 = db._conn.execute(
-                            "SELECT 1 FROM clues WHERE clue = ? AND answer = ? LIMIT 1",
-                            (clue_text, word_upper),
+                            "SELECT 1 FROM clues WHERE clue_normalized = ? AND answer = ? LIMIT 1",
+                            (clue_text.lower(), word_upper),
                         )
                         is_clue_match = cursor2.fetchone() is not None
                 except Exception:
