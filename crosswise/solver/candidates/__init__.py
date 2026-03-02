@@ -2,9 +2,6 @@
 
 Primary source: SQLite database (~9-11M historical pairs).
 LLM fallback: Claude Opus/Sonnet for batch generation, extended thinking for wordplay.
-Legacy: OpenAI functions for solve_puzzle.py CLI + sniper escalation.
-
-All public names are re-exported here for backward compatibility.
 """
 
 from dotenv import load_dotenv
@@ -28,11 +25,6 @@ from .models import (
 from .prompts import _build_prompt, _parse_response
 
 # Level 2: providers + scoring + database + web
-from .openai_legacy import (
-    generate_candidates_batch,
-    generate_candidates,
-    generate_synonyms_batch,
-)
 from .claude import (
     generate_with_claude,
     ensure_minimum_candidates,
@@ -53,12 +45,6 @@ from .database import (
     regenerate_with_patterns,
 )
 
-# Level 3: escalation (orchestration)
-from .escalation_legacy import (
-    sniper_escalation,
-    is_wordplay_clue,
-)
-
 __all__ = [
     # models
     "ClueInput",
@@ -73,10 +59,6 @@ __all__ = [
     "_build_prompt",
     "_parse_response",
     "_matches_pattern",
-    # openai_legacy
-    "generate_candidates_batch",
-    "generate_candidates",
-    "generate_synonyms_batch",
     # claude
     "generate_with_claude",
     "ensure_minimum_candidates",
@@ -90,7 +72,4 @@ __all__ = [
     # database
     "generate_candidates_with_database",
     "regenerate_with_patterns",
-    # escalation
-    "sniper_escalation",
-    "is_wordplay_clue",
 ]

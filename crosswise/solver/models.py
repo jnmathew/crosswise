@@ -2,7 +2,7 @@
 Solver data models for crossword puzzle solving.
 """
 
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 # Try to import pydantic; provide lightweight fallbacks if unavailable
 try:
@@ -92,3 +92,93 @@ class SolveResult(BaseModel):
     theme_detected: Optional[str] = Field(
         default=None, description="Detected theme pattern, if any"
     )
+
+
+def build_solver_input_from_json(data: Dict[str, Any]) -> SolverInput:
+    """
+    Build SolverInput directly from puzzle JSON structure.
+
+    The JSON has:
+    - grid.rows, grid.cols, grid.cells (nested list)
+    - clues.across/down with number, text, start, length
+    """
+    grid_data = data["grid"]
+    rows = grid_data["rows"]
+    cols = grid_data["cols"]
+    cells = grid_data["cells"]
+
+    clue_cells: Dict[str, List[Tuple[int, int]]] = {}
+    cell_to_clues: Dict[Tuple[int, int], List[str]] = {}
+
+    for clue in data["clues"].get("across", []):
+        clue_id = f"{clue['number']}-across"
+        start_row, start_col = clue["start"]
+        length = clue["length"]
+
+        clue_cell_list = []
+        for i in range(length):
+            c = start_col + i
+            if c < cols:
+                cell = cells[start_row][c]
+                if not cell.get("is_block", False):
+                    clue_cell_list.append((start_row, c))
+                else:
+                    break
+        clue_cells[clue_id] = clue_cell_list
+
+    for clue in data["clues"].get("down", []):
+        clue_id = f"{clue['number']}-down"
+        start_row, start_col = clue["start"]
+        length = clue["length"]
+
+        clue_cell_list = []
+        for i in range(length):
+            r = start_row + i
+            if r < rows:
+                cell = cells[r][start_col]
+                if not cell.get("is_block", False):
+                    clue_cell_list.append((r, start_col))
+                else:
+                    break
+        clue_cells[clue_id] = clue_cell_list
+
+    for clue_id, cell_list in clue_cells.items():
+        for cell in cell_list:
+            if cell not in cell_to_clues:
+                cell_to_clues[cell] = []
+            cell_to_clues[cell].append(clue_id)
+
+    return SolverInput(
+        clue_cells=clue_cells,
+        cell_to_clues=cell_to_clues,
+        grid_size=(rows, cols),
+    )
+
+
+def build_clue_inputs_from_json(
+    data: Dict[str, Any],
+    solver_input: Optional[SolverInput] = None,
+) -> List["ClueInput"]:
+    """Build ClueInput list from puzzle JSON for candidate generation."""
+    from crosswise.solver.candidates import ClueInput, categorize_clue
+
+    clue_inputs = []
+
+    for direction in ["across", "down"]:
+        for clue in data["clues"].get(direction, []):
+            clue_id = f"{clue['number']}-{direction}"
+            text = clue["text"]
+            num_crossings = 0
+            if solver_input is not None:
+                num_crossings = solver_input.crossing_count(clue_id)
+            clue_inputs.append(
+                ClueInput(
+                    clue_id=clue_id,
+                    text=text,
+                    length=clue["length"],
+                    category=categorize_clue(text),
+                    num_crossings=num_crossings,
+                )
+            )
+
+    return clue_inputs

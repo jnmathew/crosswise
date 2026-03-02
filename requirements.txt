@@ -12,8 +12,6 @@ uvicorn[standard]>=0.20.0
 
 # LLM Integration
 anthropic>=0.7.0
-openai>=1.0.0
-mistralai>=1.0.0
 google-genai>=1.0.0
 python-dotenv>=1.0.1
 

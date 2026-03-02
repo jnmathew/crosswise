@@ -454,7 +454,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
     put_progress(SolveProgress(stage="candidates", message="Database lookup...", progress=0.1))
     db = ClueDatabase()
     candidates = generate_candidates_with_database(
-        clue_inputs, db=db, candidates_per_clue=12, use_llm_fallback=False
+        clue_inputs, db=db, candidates_per_clue=12
     )
 
     # Track which candidates came from DB vs LLM
@@ -769,7 +769,7 @@ def _run_solve(
     cancel_event: Optional[threading.Event] = None,
 ):
     """Orchestrate the full solve pipeline: candidates -> solve -> diagnostics -> hints."""
-    from crosswise.solver.solve_puzzle import build_solver_input_from_json, build_clue_inputs_from_json
+    from crosswise.solver.models import build_solver_input_from_json, build_clue_inputs_from_json
     from crosswise.solver.cost_tracker import reset_tracker
 
     _t0 = time.time()

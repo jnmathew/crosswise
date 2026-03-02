@@ -37,8 +37,6 @@ from crosswise.solver.puzzles import get_tiny_3x3, get_mini_5x5, get_t_intersect
 
 # Candidate generation
 from crosswise.solver.candidates import (
-    generate_candidates,
-    generate_candidates_batch,
     generate_with_extended_thinking,
     ClueInput,
     CandidateResult,
@@ -67,8 +65,6 @@ __all__ = [
     "get_mini_5x5",
     "get_t_intersection",
     # Candidate generation
-    "generate_candidates",
-    "generate_candidates_batch",
     "ClueInput",
     "CandidateResult",
     "ScoredCandidate",
