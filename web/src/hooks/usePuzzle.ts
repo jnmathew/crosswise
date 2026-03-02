@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { PuzzleData } from '../types/puzzle';
 import { transformPuzzle, type CrosswordData } from '../utils/transformPuzzle';
 
@@ -7,7 +7,7 @@ interface UsePuzzleResult {
   crosswordData: CrosswordData | null;
   loading: boolean;
   error: string | null;
-  refetch: () => void;
+  refetch: (updateCrosswordData?: boolean) => void;
 }
 
 export function usePuzzle(puzzleId: string): UsePuzzleResult {
@@ -16,8 +16,10 @@ export function usePuzzle(puzzleId: string): UsePuzzleResult {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [fetchKey, setFetchKey] = useState(0);
+  const updateCrosswordDataRef = useRef(false);
 
-  const refetch = useCallback(() => {
+  const refetch = useCallback((updateCrosswordData = false) => {
+    updateCrosswordDataRef.current = updateCrosswordData;
     setFetchKey((k) => k + 1);
   }, []);
 
@@ -43,11 +45,12 @@ export function usePuzzle(puzzleId: string): UsePuzzleResult {
         const data: PuzzleData = await res.json();
         if (!cancelled) {
           setPuzzle(data);
-          // Only update crosswordData on initial load. On refetch (solver
-          // completed), changing the data prop causes react-crossword to
-          // re-initialize the grid, which wipes the user's entered letters.
-          if (!isRefetch) {
+          // Update crosswordData on initial load, or when explicitly requested
+          // (e.g. skeleton→real clues). Skip on solver-complete refetch to
+          // avoid react-crossword re-init wiping user's entered letters.
+          if (!isRefetch || updateCrosswordDataRef.current) {
             setCrosswordData(transformPuzzle(data));
+            updateCrosswordDataRef.current = false;
           }
           setLoading(false);
         }

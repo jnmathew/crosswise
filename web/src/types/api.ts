@@ -47,6 +47,12 @@ export interface GridResizeResponse {
   black_cells: boolean[][];
 }
 
+export interface StartPipelineResponse {
+  session_id: string;
+  puzzle_id: string;
+  status: string;
+}
+
 export interface PuzzleListEntry {
   id: string;
   title: string;

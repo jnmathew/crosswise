@@ -12,225 +12,211 @@ interface HintPanelProps {
   clue: PuzzleClue | null;
   direction: Direction | null;
   hintState: ClueHintState;
-  checkResult?: 'correct' | 'incorrect' | 'incomplete' | null;
   isSolving?: boolean;
   onRevealHint: () => void;
   onRevealExplanation: () => void;
-  onRevealAnswer: () => void;
-  onCheckWord?: () => void;
+  onCheckLetter: () => void;
+  onCheckWord: () => void;
+  onCheckPuzzle: () => void;
+  onRevealLetter: () => void;
+  onRevealWord: () => void;
+  onRevealPuzzle: () => void;
 }
 
 export default function HintPanel({
   clue,
   direction,
   hintState,
-  checkResult,
   isSolving,
   onRevealHint,
   onRevealExplanation,
-  onRevealAnswer,
+  onCheckLetter,
   onCheckWord,
+  onCheckPuzzle,
+  onRevealLetter,
+  onRevealWord,
+  onRevealPuzzle,
 }: HintPanelProps) {
-  if (!clue || !direction) {
-    return <div style={styles.panel}><p style={styles.placeholder}>Select a clue to see hints</p></div>;
-  }
-
-  const hasSolution = clue.answer !== null && !clue.answer.includes('?');
-  const hasHint = clue.hint !== null;
-  const hasExplanation = clue.explanation !== null;
+  const hasSolution = clue && direction && clue.answer !== null && !clue.answer.includes('?');
+  const hasHint = clue?.hint !== null;
+  const hasExplanation = clue?.explanation !== null;
 
   return (
-    <div style={styles.panel}>
-      <div style={styles.clueHeader}>
-        <span style={styles.clueNumber}>{clue.number}-{direction}</span>
-        <span style={styles.clueLength}>({clue.length} letters)</span>
+    <div style={styles.bar}>
+      {/* Left: clue text + revealed hints */}
+      <div style={styles.clueArea}>
+        {!clue || !direction ? (
+          <span style={styles.placeholder}>Select a clue</span>
+        ) : (
+          <>
+            <span style={styles.clueText}>
+              <strong>{clue.number}{direction === 'across' ? 'A' : 'D'}</strong>
+              {' '}{clue.text}
+            </span>
+            {hintState.hintRevealed && hasHint && (
+              <span style={styles.hintText}>{clue.hint}</span>
+            )}
+            {hintState.explanationRevealed && hasExplanation && (
+              <span style={styles.hintText}>{clue.explanation}</span>
+            )}
+            {hintState.answerRevealed && (
+              <span style={styles.answerText}>{clue.answer}</span>
+            )}
+          </>
+        )}
       </div>
-      <p style={styles.clueText}>{clue.text}</p>
 
-      {/* Check Word button — always available when answer is known */}
-      {hasSolution && onCheckWord && (
-        <div style={styles.section}>
-          <button
-            style={{ ...styles.button, ...styles.checkButton }}
-            onClick={onCheckWord}
-          >
-            Check Word
-          </button>
-          {checkResult === 'correct' && (
-            <p style={styles.checkCorrect}>Correct!</p>
-          )}
-          {checkResult === 'incorrect' && (
-            <p style={styles.checkIncorrect}>Not quite — try again</p>
-          )}
-          {checkResult === 'incomplete' && (
-            <p style={styles.checkIncomplete}>Fill in all letters first</p>
-          )}
-        </div>
-      )}
+      {/* Right: action buttons */}
+      <div style={styles.actions}>
+        {!hasSolution && clue && direction && isSolving && (
+          <span style={styles.solvingNote}>Solving...</span>
+        )}
 
-      {/* Solving in progress indicator */}
-      {!hasSolution && isSolving && (
-        <p style={styles.solvingNote}>Solver is working — hints will appear when ready</p>
-      )}
+        {hasSolution && (
+          <>
+            {/* Hint / Explain */}
+            <div style={styles.hintButtons}>
+              {hasHint && !hintState.hintRevealed && (
+                <button style={styles.btn} onClick={onRevealHint}>Hint</button>
+              )}
+              {hasExplanation && !hintState.explanationRevealed && (
+                <button
+                  style={{
+                    ...styles.btn,
+                    ...(hintState.hintRevealed || hintState.answerRevealed ? {} : styles.btnDisabled),
+                  }}
+                  onClick={onRevealExplanation}
+                  disabled={!hintState.hintRevealed && !hintState.answerRevealed}
+                >
+                  Explain
+                </button>
+              )}
+            </div>
 
-      {/* No solution and not solving */}
-      {!hasSolution && !isSolving && (
-        <p style={styles.unsolved}>Unsolved — no hints available</p>
-      )}
-
-      {hasSolution && hasHint && (
-        <div style={styles.section}>
-          {hintState.hintRevealed ? (
-            <p style={styles.revealedText}>{clue.hint}</p>
-          ) : (
-            <button style={styles.button} onClick={onRevealHint}>
-              Get Hint
-            </button>
-          )}
-        </div>
-      )}
-
-      {hasSolution && hasExplanation && (
-        <div style={styles.section}>
-          {hintState.explanationRevealed ? (
-            <p style={styles.revealedText}>{clue.explanation}</p>
-          ) : (
-            <button
-              style={{
-                ...styles.button,
-                ...(hintState.hintRevealed || hintState.answerRevealed
-                  ? {}
-                  : styles.buttonDisabled),
-              }}
-              onClick={onRevealExplanation}
-              disabled={!hintState.hintRevealed && !hintState.answerRevealed}
-            >
-              Explain
-            </button>
-          )}
-        </div>
-      )}
-
-      {hasSolution && (
-        <div style={styles.section}>
-          {hintState.answerRevealed ? (
-            <p style={styles.answerText}>Answer: {clue.answer}</p>
-          ) : (
-            <button style={{ ...styles.button, ...styles.revealButton }} onClick={onRevealAnswer}>
-              Reveal Answer
-            </button>
-          )}
-        </div>
-      )}
+            {/* Check / Reveal stacked */}
+            <div style={styles.checkRevealStack}>
+              <div style={styles.actionGroup}>
+                <span style={styles.actionLabel}>Check</span>
+                <div style={styles.segmented}>
+                  <button style={styles.segBtn} onClick={onCheckLetter}>Letter</button>
+                  <button style={styles.segBtn} onClick={onCheckWord}>Word</button>
+                  <button style={styles.segBtn} onClick={onCheckPuzzle}>Puzzle</button>
+                </div>
+              </div>
+              <div style={styles.actionGroup}>
+                <span style={styles.actionLabel}>Reveal</span>
+                <div style={styles.segmented}>
+                  <button style={styles.segBtn} onClick={onRevealLetter}>Letter</button>
+                  <button style={styles.segBtn} onClick={onRevealWord}>Word</button>
+                  <button style={styles.segBtn} onClick={onRevealPuzzle}>Puzzle</button>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  panel: {
-    padding: '16px',
-    border: '1px solid #ddd',
+  bar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '16px',
+    padding: '12px 16px',
+    backgroundColor: '#f0f4f8',
     borderRadius: '8px',
-    backgroundColor: '#fafafa',
-    minWidth: '280px',
+    marginBottom: '12px',
+    minHeight: '48px',
+    width: '100%',
+    maxWidth: '1100px',
+  },
+  clueArea: {
+    flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
   },
   placeholder: {
     color: '#999',
     fontStyle: 'italic',
-  },
-  clueHeader: {
-    display: 'flex',
-    alignItems: 'baseline',
-    gap: '8px',
-    marginBottom: '4px',
-  },
-  clueNumber: {
-    fontWeight: 'bold',
-    color: '#333',
-    textTransform: 'uppercase' as const,
-  },
-  clueLength: {
-    fontSize: '12px',
-    color: '#888',
+    fontSize: '16px',
   },
   clueText: {
-    color: '#444',
-    fontSize: '14px',
-    lineHeight: '1.4',
-    margin: '0 0 12px 0',
+    fontSize: '17px',
+    color: '#333',
   },
-  unsolved: {
-    color: '#b55',
+  hintText: {
+    fontSize: '13px',
+    color: '#4b5563',
     fontStyle: 'italic',
+  },
+  answerText: {
     fontSize: '14px',
+    fontWeight: 'bold',
+    color: '#15803d',
+    letterSpacing: '2px',
   },
   solvingNote: {
     color: '#6b7280',
     fontStyle: 'italic',
     fontSize: '13px',
-    margin: 0,
+    whiteSpace: 'nowrap' as const,
   },
-  section: {
-    marginTop: '8px',
+  actions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    flexShrink: 0,
   },
-  button: {
-    padding: '8px 16px',
-    border: '1px solid #aaa',
+  hintButtons: {
+    display: 'flex',
+    gap: '6px',
+  },
+  btn: {
+    padding: '5px 12px',
+    border: '1px solid #9ca3af',
     borderRadius: '4px',
     backgroundColor: '#fff',
     cursor: 'pointer',
-    fontSize: '14px',
-    width: '100%',
+    fontSize: '12px',
+    whiteSpace: 'nowrap' as const,
   },
-  checkButton: {
-    backgroundColor: '#f0f9ff',
-    borderColor: '#7dd3fc',
-    color: '#0369a1',
-    fontWeight: 500,
-  },
-  checkCorrect: {
-    color: '#15803d',
-    fontWeight: 600,
-    fontSize: '14px',
-    textAlign: 'center' as const,
-    margin: '6px 0 0 0',
-  },
-  checkIncorrect: {
-    color: '#b91c1c',
-    fontWeight: 500,
-    fontSize: '14px',
-    textAlign: 'center' as const,
-    margin: '6px 0 0 0',
-  },
-  checkIncomplete: {
-    color: '#92400e',
-    fontSize: '13px',
-    textAlign: 'center' as const,
-    margin: '6px 0 0 0',
-  },
-  buttonDisabled: {
+  btnDisabled: {
     opacity: 0.4,
     cursor: 'not-allowed',
   },
-  revealButton: {
-    backgroundColor: '#fee',
-    borderColor: '#c88',
+  checkRevealStack: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
   },
-  revealedText: {
-    backgroundColor: '#eef6ff',
-    padding: '8px 12px',
-    borderRadius: '4px',
-    fontSize: '14px',
-    lineHeight: '1.4',
-    margin: 0,
+  actionGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
   },
-  answerText: {
-    backgroundColor: '#eeffee',
-    padding: '8px 12px',
+  actionLabel: {
+    fontSize: '11px',
+    color: '#666',
+    fontWeight: 600,
+  },
+  segmented: {
+    display: 'flex',
+    border: '1px solid #d1d5db',
     borderRadius: '4px',
-    fontWeight: 'bold',
-    fontSize: '16px',
-    letterSpacing: '2px',
-    margin: 0,
+    overflow: 'hidden',
+  },
+  segBtn: {
+    padding: '5px 10px',
+    border: 'none',
+    borderRight: '1px solid #d1d5db',
+    backgroundColor: '#fff',
+    cursor: 'pointer',
+    fontSize: '11px',
+    color: '#444',
+    whiteSpace: 'nowrap' as const,
   },
 };

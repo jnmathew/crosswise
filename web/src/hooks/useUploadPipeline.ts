@@ -1,4 +1,4 @@
-import type { UploadResponse, MaskData, MaskResponse, GridEditResponse, GridResizeResponse } from '../types/api';
+import type { UploadResponse, MaskData, MaskResponse, GridEditResponse, GridResizeResponse, StartPipelineResponse } from '../types/api';
 
 export function useUploadPipeline() {
   async function submitGridEdit(sessionId: string, blackCells: boolean[][]): Promise<GridEditResponse> {
@@ -68,5 +68,18 @@ export function useUploadPipeline() {
     return res.json();
   }
 
-  return { uploadPhoto, submitGridEdit, submitMask, startSolve, resizeGrid, submitManualCrop };
+  async function startPipeline(sessionId: string, masks: MaskData): Promise<StartPipelineResponse> {
+    const res = await fetch(`/api/${sessionId}/start-pipeline`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(masks),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || 'Pipeline start failed');
+    }
+    return res.json();
+  }
+
+  return { uploadPhoto, submitGridEdit, submitMask, startSolve, startPipeline, resizeGrid, submitManualCrop };
 }

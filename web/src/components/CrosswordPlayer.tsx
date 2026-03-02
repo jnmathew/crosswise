@@ -24,16 +24,24 @@ const GRID_HEIGHT = 500;
  */
 function ClueTracker({
   onClueChange,
+  onPositionChange,
 }: {
   onClueChange: (direction: Direction, number: string) => void;
+  onPositionChange: (pos: { row: number; col: number }) => void;
 }) {
-  const { selectedDirection, selectedNumber } = useContext(CrosswordContext);
+  const { selectedDirection, selectedNumber, selectedPosition } = useContext(CrosswordContext);
 
   useEffect(() => {
     if (selectedDirection && selectedNumber) {
       onClueChange(selectedDirection, selectedNumber);
     }
   }, [selectedDirection, selectedNumber, onClueChange]);
+
+  useEffect(() => {
+    if (selectedPosition) {
+      onPositionChange(selectedPosition);
+    }
+  }, [selectedPosition, onPositionChange]);
 
   return null;
 }
@@ -47,8 +55,17 @@ export default function CrosswordPlayer() {
 
   const [activeDirection, setActiveDirection] = useState<Direction | null>(null);
   const [activeNumber, setActiveNumber] = useState<number | null>(null);
+  const [activePosition, setActivePosition] = useState<{ row: number; col: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [checkResult, setCheckResult] = useState<'correct' | 'incorrect' | 'incomplete' | null>(null);
+
+  // Solve timer (persisted to localStorage)
+  const timerKey = `crosswise-timer-${puzzleId}`;
+  const [elapsedSeconds, setElapsedSeconds] = useState(() => {
+    const stored = localStorage.getItem(timerKey);
+    return stored ? parseInt(stored, 10) || 0 : 0;
+  });
+  const [timerRunning, setTimerRunning] = useState(false);
+
 
   // Editable puzzle name (null = use derived default from puzzle metadata)
   const [nameOverride, setNameOverride] = useState<string | null>(null);
@@ -58,23 +75,44 @@ export default function CrosswordPlayer() {
   // Reference image modal
   const [showRefImage, setShowRefImage] = useState<'original' | 'masked' | null>(null);
 
-  // Togglable correct counter
-  const [showCounter, setShowCounter] = useState(() => {
-    const stored = localStorage.getItem('crosswise-show-counter');
-    return stored === 'true'; // default to hidden
-  });
-
   // Collapsible solve banner
   const [bannerExpanded, setBannerExpanded] = useState(true);
 
+  // Timer: tick every second when running
+  useEffect(() => {
+    if (!timerRunning) return;
+    const id = setInterval(() => {
+      setElapsedSeconds((s) => {
+        const next = s + 1;
+        localStorage.setItem(timerKey, String(next));
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [timerRunning, timerKey]);
+
+  // Timer: pause when tab is hidden, resume when visible
+  useEffect(() => {
+    const handler = () => {
+      if (document.hidden) setTimerRunning(false);
+      else setTimerRunning(true);
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, []);
+
   // Solve diagnostics
   type DiagCandidate = { word: string; source: string; confidence: number; verified: boolean };
+  type TraceEvent = { phase: string; candidates?: number; result?: string };
   type DiagClue = {
     clue_id: string; text: string; length: number; category: string | null;
     candidates: DiagCandidate[]; candidate_count: number;
     assigned_answer: string | null; status: 'solved' | 'unsolved' | 'no_candidates';
+    trace?: TraceEvent[]; solved_by?: string | null;
   };
+  type TimelineEntry = { t: number; phase: string; summary: string };
   const [diagnostics, setDiagnostics] = useState<DiagClue[] | null>(null);
+  const [timeline, setTimeline] = useState<TimelineEntry[] | null>(null);
   const [diagOpen, setDiagOpen] = useState(false);
   const [diagExpandedClue, setDiagExpandedClue] = useState<string | null>(null);
 
@@ -82,20 +120,20 @@ export default function CrosswordPlayer() {
   const acrossCluesRef = useRef<HTMLDivElement>(null);
   const downCluesRef = useRef<HTMLDivElement>(null);
 
-  // Track user cell input for "Check Word" feature and correct count
+  // Track user cell input for "Check Word" feature
   const userGridRef = useRef<Record<string, string>>({});
-  const [userCorrectCount, setUserCorrectCount] = useState(0);
 
   const puzzleName = nameOverride ?? (puzzle?.metadata.name || puzzleId.replace('IMG_', 'Puzzle #'));
 
-  // Check if a solve is in progress by polling session status
+  // Check if a pipeline/solve is in progress by polling session status
   const [isSolving, setIsSolving] = useState(false);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
   useEffect(() => {
     if (!puzzleId) return;
     fetch(`/api/${puzzleId}/status`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
-        if (data && (data.status === 'solving' || data.status === 'generating_hints')) {
+        if (data && ['ocr_running', 'solving', 'generating_hints'].includes(data.status)) {
           setIsSolving(true);
         }
       })
@@ -126,7 +164,27 @@ export default function CrosswordPlayer() {
       const timer = showToast('Solve finished with partial results.');
       return () => clearTimeout(timer);
     }
+    if (solveDone && progress?.stage === 'cancelled') {
+      setIsSolving(false);
+      const timer = showToast('Solve cancelled.');
+      return () => clearTimeout(timer);
+    }
   }, [solveDone, progress?.stage, refetch, showToast]);
+
+  // When clues are ready (OCR complete), refetch puzzle and update crosswordData
+  useEffect(() => {
+    if (progress?.stage === 'clues_ready') {
+      refetch(true);
+    }
+  }, [progress?.stage, refetch]);
+
+  // Handle verification failure — show error, stop solving
+  useEffect(() => {
+    if (progress?.stage === 'verification_failed') {
+      setPipelineError(progress.message || 'Clue verification failed. The image may not contain a valid crossword.');
+      setIsSolving(false);
+    }
+  }, [progress?.stage, progress?.message]);
 
   // Fetch solve diagnostics, guarding against non-JSON responses
   const fetchDiagnostics = useCallback(() => {
@@ -137,7 +195,16 @@ export default function CrosswordPlayer() {
         if (r.ok && ct.includes('application/json')) return r.json();
         return null;
       })
-      .then((data) => { if (data) setDiagnostics(data); })
+      .then((data) => {
+        if (!data) return;
+        // Handle both old format (array) and new format ({clues, timeline})
+        if (Array.isArray(data)) {
+          setDiagnostics(data);
+        } else {
+          setDiagnostics(data.clues || []);
+          if (data.timeline) setTimeline(data.timeline);
+        }
+      })
       .catch(() => {});
   }, [puzzleId]);
 
@@ -148,6 +215,10 @@ export default function CrosswordPlayer() {
 
   // Also try to load diagnostics on mount (for already-solved puzzles)
   useEffect(() => { fetchDiagnostics(); }, [fetchDiagnostics]);
+
+  const handleCancelSolve = useCallback(() => {
+    fetch(`/api/${puzzleId}/cancel`, { method: 'POST' }).catch(() => {});
+  }, [puzzleId]);
 
   // Scroll active clue into view in the clue list
   const scrollClueIntoView = useCallback((dir: Direction, num: number) => {
@@ -164,14 +235,16 @@ export default function CrosswordPlayer() {
   }, []);
 
   // Called by ClueTracker (inside CrosswordProvider) whenever the active clue changes
-  // from ANY source: cell click, clue click, keyboard navigation
   const handleClueChange = useCallback((direction: Direction, number: string) => {
     const num = parseInt(number, 10);
     setActiveDirection(direction);
     setActiveNumber(num);
-    setCheckResult(null);
     scrollClueIntoView(direction, num);
   }, [scrollClueIntoView]);
+
+  const handlePositionChange = useCallback((pos: { row: number; col: number }) => {
+    setActivePosition(pos);
+  }, []);
 
   const clueMap = useMemo(() => {
     if (!puzzle) return {};
@@ -184,8 +257,6 @@ export default function CrosswordPlayer() {
     }
     return map;
   }, [puzzle]);
-
-  const totalClues = puzzle ? puzzle.clues.across.length + puzzle.clues.down.length : 0;
 
   const activeClue = activeDirection && activeNumber
     ? clueMap[`${activeNumber}-${activeDirection}`] ?? null
@@ -201,40 +272,6 @@ export default function CrosswordPlayer() {
     // ClueTracker handles state updates — no-op here to avoid double-updates
   }, []);
 
-  // Recount how many words the user has filled in correctly
-  const recomputeCorrectCount = useCallback(() => {
-    if (!puzzle) return;
-    let correct = 0;
-    const allClues = [...puzzle.clues.across, ...puzzle.clues.down];
-    for (const clue of allClues) {
-      if (!clue.answer || clue.answer.includes('?')) continue;
-      const dir = puzzle.clues.across.includes(clue) ? 'across' : 'down';
-      const [startRow, startCol] = clue.start;
-      let word = '';
-      let allFilled = true;
-      for (let i = 0; i < clue.length; i++) {
-        const r = dir === 'across' ? startRow : startRow + i;
-        const c = dir === 'across' ? startCol + i : startCol;
-        const letter = userGridRef.current[`${r},${c}`];
-        if (letter) {
-          word += letter;
-        } else {
-          allFilled = false;
-          break;
-        }
-      }
-      if (allFilled && word === clue.answer.toUpperCase()) {
-        correct++;
-      }
-    }
-    setUserCorrectCount(correct);
-  }, [puzzle]);
-
-  // Recompute when puzzle data changes (e.g. solver completes, answers now available)
-  useEffect(() => {
-    recomputeCorrectCount();
-  }, [recomputeCorrectCount]);
-
   const handleCellChange = useCallback((row: number, col: number, char: string) => {
     const key = `${row},${col}`;
     if (char) {
@@ -242,59 +279,120 @@ export default function CrosswordPlayer() {
     } else {
       delete userGridRef.current[key];
     }
-    recomputeCorrectCount();
-  }, [recomputeCorrectCount]);
+  }, []);
 
-  const handleAnswerCorrect = useCallback(() => {
-    recomputeCorrectCount();
-  }, [recomputeCorrectCount]);
-
-  // Check if the user's current word matches the answer
-  const handleCheckWord = useCallback(() => {
-    if (!activeClue || !activeDirection || activeNumber == null) return;
-    const answer = activeClue.answer;
-    if (!answer || answer.includes('?')) return;
-
-    const [startRow, startCol] = activeClue.start;
-    let userWord = '';
-    let allFilled = true;
-
-    for (let i = 0; i < activeClue.length; i++) {
-      const row = activeDirection === 'across' ? startRow : startRow + i;
-      const col = activeDirection === 'across' ? startCol + i : startCol;
-      const letter = userGridRef.current[`${row},${col}`];
-      if (letter) {
-        userWord += letter;
-      } else {
-        allFilled = false;
-        userWord += ' ';
+  // Helper: get correct letter at a cell by finding the clue that covers it
+  const getCorrectLetter = useCallback((row: number, col: number): string | null => {
+    if (!puzzle) return null;
+    for (const dir of ['across', 'down'] as const) {
+      for (const clue of puzzle.clues[dir]) {
+        if (!clue.answer || clue.answer.includes('?')) continue;
+        const [sr, sc] = clue.start;
+        for (let i = 0; i < clue.length; i++) {
+          const r = dir === 'across' ? sr : sr + i;
+          const c = dir === 'across' ? sc + i : sc;
+          if (r === row && c === col) return clue.answer[i].toUpperCase();
+        }
       }
     }
+    return null;
+  }, [puzzle]);
 
-    if (!allFilled) {
-      setCheckResult('incomplete');
-    } else if (userWord === answer.toUpperCase()) {
-      setCheckResult('correct');
-    } else {
-      setCheckResult('incorrect');
+  // --- Check actions ---
+  const handleCheckLetter = useCallback(() => {
+    if (!activePosition) return;
+    const { row, col } = activePosition;
+    const correct = getCorrectLetter(row, col);
+    if (!correct) { showToast('No answer available for this cell'); return; }
+    const user = userGridRef.current[`${row},${col}`];
+    if (!user) showToast('Empty cell');
+    else if (user === correct) showToast('Correct!');
+    else showToast('Incorrect');
+  }, [activePosition, getCorrectLetter, showToast]);
+
+  const handleCheckWord = useCallback(() => {
+    if (!activeClue || !activeDirection) return;
+    const answer = activeClue.answer;
+    if (!answer || answer.includes('?')) { showToast('No answer available'); return; }
+    const [sr, sc] = activeClue.start;
+    let userWord = '';
+    let allFilled = true;
+    for (let i = 0; i < activeClue.length; i++) {
+      const r = activeDirection === 'across' ? sr : sr + i;
+      const c = activeDirection === 'across' ? sc + i : sc;
+      const letter = userGridRef.current[`${r},${c}`];
+      if (letter) userWord += letter;
+      else { allFilled = false; break; }
     }
+    if (!allFilled) showToast('Fill in all letters first');
+    else if (userWord === answer.toUpperCase()) showToast('Correct!');
+    else showToast('Not quite — try again');
+  }, [activeClue, activeDirection, showToast]);
 
-    // Clear result after 3 seconds
-    setTimeout(() => setCheckResult(null), 3000);
-  }, [activeClue, activeDirection, activeNumber]);
+  const handleCheckPuzzle = useCallback(() => {
+    if (!puzzle) return;
+    let correct = 0;
+    let total = 0;
+    for (const dir of ['across', 'down'] as const) {
+      for (const clue of puzzle.clues[dir]) {
+        if (!clue.answer || clue.answer.includes('?')) continue;
+        total++;
+        const [sr, sc] = clue.start;
+        let word = '';
+        let filled = true;
+        for (let i = 0; i < clue.length; i++) {
+          const r = dir === 'across' ? sr : sr + i;
+          const c = dir === 'across' ? sc + i : sc;
+          const letter = userGridRef.current[`${r},${c}`];
+          if (letter) word += letter;
+          else { filled = false; break; }
+        }
+        if (filled && word === clue.answer.toUpperCase()) correct++;
+      }
+    }
+    showToast(`${correct} of ${total} words correct`);
+  }, [puzzle, showToast]);
 
-  const handleRevealAnswer = useCallback(() => {
+  // --- Reveal actions ---
+  const handleRevealLetter = useCallback(() => {
+    if (!activePosition || !crosswordRef.current) return;
+    const { row, col } = activePosition;
+    const correct = getCorrectLetter(row, col);
+    if (!correct) { showToast('No answer available for this cell'); return; }
+    crosswordRef.current.setGuess(row, col, correct);
+    userGridRef.current[`${row},${col}`] = correct;
+    if (activeDirection && activeNumber) revealAnswer(activeDirection, activeNumber);
+  }, [activePosition, getCorrectLetter, activeDirection, activeNumber, revealAnswer, showToast]);
+
+  const handleRevealWord = useCallback(() => {
     if (!activeDirection || !activeNumber || !activeClue?.answer || !crosswordRef.current) return;
     revealAnswer(activeDirection, activeNumber);
-
     const answer = activeClue.answer!;
-    const [startRow, startCol] = activeClue.start;
+    const [sr, sc] = activeClue.start;
     for (let i = 0; i < answer.length; i++) {
-      const row = activeDirection === 'across' ? startRow : startRow + i;
-      const col = activeDirection === 'across' ? startCol + i : startCol;
-      crosswordRef.current.setGuess(row, col, answer[i].toUpperCase());
+      const r = activeDirection === 'across' ? sr : sr + i;
+      const c = activeDirection === 'across' ? sc + i : sc;
+      crosswordRef.current.setGuess(r, c, answer[i].toUpperCase());
+      userGridRef.current[`${r},${c}`] = answer[i].toUpperCase();
     }
   }, [activeDirection, activeNumber, activeClue, revealAnswer]);
+
+  const handleRevealPuzzle = useCallback(() => {
+    if (!puzzle || !crosswordRef.current) return;
+    for (const dir of ['across', 'down'] as const) {
+      for (const clue of puzzle.clues[dir]) {
+        if (!clue.answer || clue.answer.includes('?')) continue;
+        revealAnswer(dir === 'across' ? 'across' : 'down', clue.number);
+        const [sr, sc] = clue.start;
+        for (let i = 0; i < clue.answer.length; i++) {
+          const r = dir === 'across' ? sr : sr + i;
+          const c = dir === 'across' ? sc + i : sc;
+          crosswordRef.current!.setGuess(r, c, clue.answer[i].toUpperCase());
+          userGridRef.current[`${r},${c}`] = clue.answer[i].toUpperCase();
+        }
+      }
+    }
+  }, [puzzle, revealAnswer]);
 
   const savePuzzleName = useCallback((name: string) => {
     setNameOverride(name);
@@ -306,13 +404,7 @@ export default function CrosswordPlayer() {
     });
   }, [puzzleId]);
 
-  const toggleCounter = useCallback(() => {
-    setShowCounter((prev) => {
-      const next = !prev;
-      localStorage.setItem('crosswise-show-counter', String(next));
-      return next;
-    });
-  }, []);
+
 
   // Focus name input when entering edit mode
   useEffect(() => {
@@ -326,11 +418,13 @@ export default function CrosswordPlayer() {
   if (error) return <div style={styles.error}>Error: {error}</div>;
   if (!crosswordData || !puzzle) return <div style={styles.error}>No puzzle data</div>;
 
-  const clueScrollHeight = (GRID_HEIGHT - 8) / 2; // 8px gap between the two boxes
+  // Grid SVG scales to fill width; actual height depends on row/col ratio
+  const gridHeight = Math.round(GRID_HEIGHT * (puzzle.grid.rows / puzzle.grid.cols));
 
   return (
     <div style={styles.container}>
       <Link to="/" style={styles.brandLink}>
+        <img src="/crosswise.svg" alt="" style={styles.brandLogo} />
         <h1 style={styles.brand}>Crosswise</h1>
       </Link>
 
@@ -368,8 +462,22 @@ export default function CrosswordPlayer() {
               <p style={styles.solveBannerSub}>
                 You can start filling in answers while the solver works. Hints will appear when ready.
               </p>
+              <button
+                style={styles.stopBtn}
+                onClick={(e) => { e.stopPropagation(); handleCancelSolve(); }}
+              >
+                Stop Solve
+              </button>
             </>
           )}
+        </div>
+      )}
+
+      {/* Pipeline error banner (e.g. verification failed) */}
+      {pipelineError && (
+        <div style={styles.errorBanner}>
+          <span>{pipelineError}</span>
+          <Link to="/upload" style={styles.errorBannerLink}>Try another image</Link>
         </div>
       )}
 
@@ -377,6 +485,69 @@ export default function CrosswordPlayer() {
       {diagnostics && (() => {
         const solvedCount = diagnostics.filter((d) => d.status === 'solved').length;
         const unsolved = diagnostics.filter((d) => d.status !== 'solved');
+
+        const solvedByColor: Record<string, string> = {
+          db_prefill: '#9ca3af',
+          constraint_prop: '#16a34a',
+          constraint_prop_final: '#16a34a',
+          conflict_resolution: '#ea580c',
+          post_resolution: '#2563eb',
+          csp_cleanup: '#7c3aed',
+        };
+        const solvedByLabel = (s: string | null | undefined) => {
+          if (!s) return null;
+          const color = s.startsWith('llm_pass') ? '#2563eb' : (solvedByColor[s] || '#666');
+          const label = s.replace(/_/g, ' ');
+          return <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '3px', background: color + '18', color, fontWeight: 500, marginLeft: '4px' }}>{label}</span>;
+        };
+
+        const traceLineEl = (trace?: TraceEvent[]) => {
+          if (!trace || trace.length === 0) return null;
+          const parts = trace.map((ev) => {
+            if (ev.phase === 'db_lookup') return `DB: ${ev.candidates}`;
+            if (ev.phase === 'web_search') return `Web: ${ev.result}`;
+            if (ev.phase === 'opus') return `Opus: ${ev.candidates}`;
+            if (ev.phase === 'sonnet_pad') return `Sonnet: ${ev.candidates}`;
+            return ev.phase;
+          });
+          return <div style={{ fontSize: '11px', color: '#888', paddingLeft: '16px' }}>{parts.join(' \u00B7 ')}</div>;
+        };
+
+        const renderDiagClue = (d: DiagClue) => (
+          <div key={d.clue_id} style={styles.diagClue}>
+            <div
+              style={styles.diagClueHeader}
+              onClick={() => setDiagExpandedClue(diagExpandedClue === d.clue_id ? null : d.clue_id)}
+            >
+              <span>
+                <strong>{d.clue_id}</strong>: {d.text} ({d.length})
+                {d.assigned_answer && (
+                  <span style={{ color: '#16a34a', marginLeft: '6px' }}>= {d.assigned_answer}</span>
+                )}
+                {solvedByLabel(d.solved_by)}
+              </span>
+              <span style={{ fontSize: '11px', color: '#999' }}>
+                {d.candidate_count === 0 ? 'no candidates' : `${d.candidate_count} cands`}
+                {' '}{diagExpandedClue === d.clue_id ? '\u25B2' : '\u25BC'}
+              </span>
+            </div>
+            {traceLineEl(d.trace)}
+            {diagExpandedClue === d.clue_id && d.candidates.length > 0 && (
+              <div style={styles.diagCandidates}>
+                {d.candidates.slice(0, 20).map((c, i) => (
+                  <div key={i} style={styles.diagCandRow}>
+                    <span style={{ fontFamily: 'monospace' }}>{c.word}</span>
+                    <span style={{ color: '#888', fontSize: '11px' }}>
+                      {c.source} &middot; {Math.round(c.confidence * 100)}%
+                      {c.verified && ' \u2713'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+
         return (
           <div style={styles.diagPanel}>
             <div style={styles.diagHeader} onClick={() => setDiagOpen((v) => !v)}>
@@ -388,81 +559,35 @@ export default function CrosswordPlayer() {
             </div>
             {diagOpen && (
               <div style={styles.diagBody}>
+                {/* Timeline */}
+                {timeline && timeline.length > 0 && (
+                  <details style={{ marginBottom: '8px' }}>
+                    <summary style={{ cursor: 'pointer', fontSize: '13px', color: '#666' }}>
+                      Timeline ({timeline.length} events)
+                    </summary>
+                    <div style={{ fontFamily: 'monospace', fontSize: '11px', lineHeight: 1.6, padding: '4px 0' }}>
+                      {timeline.map((ev, i) => (
+                        <div key={i}>
+                          <span style={{ color: '#999', marginRight: '6px' }}>{ev.t}s</span>
+                          <span style={{ color: '#555', fontWeight: 500 }}>{ev.phase}</span>
+                          <span style={{ color: '#888', marginLeft: '6px' }}>{ev.summary}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
                 {unsolved.length > 0 && (
                   <div style={{ marginBottom: '8px' }}>
                     <strong>Unsolved clues:</strong>
-                    {unsolved.map((d) => (
-                      <div key={d.clue_id} style={styles.diagClue}>
-                        <div
-                          style={styles.diagClueHeader}
-                          onClick={() => setDiagExpandedClue(
-                            diagExpandedClue === d.clue_id ? null : d.clue_id
-                          )}
-                        >
-                          <span><strong>{d.clue_id}</strong>: {d.text} ({d.length} letters)</span>
-                          <span style={{ fontSize: '11px', color: '#999' }}>
-                            {d.candidate_count === 0
-                              ? 'no candidates'
-                              : `${d.candidate_count} candidates`}
-                            {' '}{diagExpandedClue === d.clue_id ? '\u25B2' : '\u25BC'}
-                          </span>
-                        </div>
-                        {diagExpandedClue === d.clue_id && d.candidates.length > 0 && (
-                          <div style={styles.diagCandidates}>
-                            {d.candidates.slice(0, 20).map((c, i) => (
-                              <div key={i} style={styles.diagCandRow}>
-                                <span style={{ fontFamily: 'monospace' }}>{c.word}</span>
-                                <span style={{ color: '#888', fontSize: '11px' }}>
-                                  {c.source} &middot; {Math.round(c.confidence * 100)}%
-                                  {c.verified && ' \u2713'}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                    {unsolved.map(renderDiagClue)}
                   </div>
                 )}
                 <details>
                   <summary style={{ cursor: 'pointer', fontSize: '13px', color: '#666' }}>
                     All clues ({diagnostics.length})
                   </summary>
-                  {diagnostics.map((d) => (
-                    <div key={d.clue_id} style={styles.diagClue}>
-                      <div
-                        style={styles.diagClueHeader}
-                        onClick={() => setDiagExpandedClue(
-                          diagExpandedClue === d.clue_id ? null : d.clue_id
-                        )}
-                      >
-                        <span>
-                          <strong>{d.clue_id}</strong>: {d.text} ({d.length})
-                          {d.assigned_answer && (
-                            <span style={{ color: '#16a34a', marginLeft: '6px' }}>
-                              = {d.assigned_answer}
-                            </span>
-                          )}
-                        </span>
-                        <span style={{ fontSize: '11px', color: '#999' }}>
-                          {d.candidate_count} cands {diagExpandedClue === d.clue_id ? '\u25B2' : '\u25BC'}
-                        </span>
-                      </div>
-                      {diagExpandedClue === d.clue_id && d.candidates.length > 0 && (
-                        <div style={styles.diagCandidates}>
-                          {d.candidates.slice(0, 20).map((c, i) => (
-                            <div key={i} style={styles.diagCandRow}>
-                              <span style={{ fontFamily: 'monospace' }}>{c.word}</span>
-                              <span style={{ color: '#888', fontSize: '11px' }}>
-                                {c.source} &middot; {Math.round(c.confidence * 100)}%
-                                {c.verified && ' \u2713'}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                  {diagnostics.map(renderDiagClue)}
                 </details>
               </div>
             )}
@@ -506,15 +631,27 @@ export default function CrosswordPlayer() {
           onClick={() => setShowRefImage('original')}
           title="View source photos"
         >
-          Photo
+          Source Image
         </button>
-        <div style={styles.progress} onClick={toggleCounter} title="Click to toggle">
-          {showCounter && (
-            <span style={styles.correctBadge}>{userCorrectCount}/{totalClues} correct</span>
-          )}
-          {!showCounter && (
-            <span style={styles.counterHidden}>&#x2022;&#x2022;&#x2022;</span>
-          )}
+        <div style={styles.timer}>
+          <span style={styles.timerDisplay}>
+            {String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:
+            {String(elapsedSeconds % 60).padStart(2, '0')}
+          </span>
+          <button
+            style={styles.timerToggle}
+            onClick={() => setTimerRunning((r) => !r)}
+            title={timerRunning ? 'Pause timer' : 'Resume timer'}
+          >
+            {timerRunning ? '\u23F8' : '\u25B6'}
+          </button>
+          <button
+            style={styles.timerToggle}
+            onClick={() => { setElapsedSeconds(0); localStorage.setItem(timerKey, '0'); }}
+            title="Reset timer"
+          >
+            &#8634;
+          </button>
         </div>
       </div>
 
@@ -556,35 +693,35 @@ export default function CrosswordPlayer() {
         storageKey={`crosswise-${puzzleId}`}
         onClueSelected={handleClueSelected}
         onCellChange={handleCellChange}
-        onAnswerCorrect={handleAnswerCorrect}
       >
-        <ClueTracker onClueChange={handleClueChange} />
+        <ClueTracker onClueChange={handleClueChange} onPositionChange={handlePositionChange} />
+        {/* Active clue bar with hints + check/reveal */}
+        <HintPanel
+          clue={activeClue}
+          direction={activeDirection}
+          hintState={hintState}
+          isSolving={isSolving}
+          onRevealHint={() => activeDirection && activeNumber && revealHint(activeDirection, activeNumber)}
+          onRevealExplanation={() => activeDirection && activeNumber && revealExplanation(activeDirection, activeNumber)}
+          onCheckLetter={handleCheckLetter}
+          onCheckWord={handleCheckWord}
+          onCheckPuzzle={handleCheckPuzzle}
+          onRevealLetter={handleRevealLetter}
+          onRevealWord={handleRevealWord}
+          onRevealPuzzle={handleRevealPuzzle}
+        />
         <div style={styles.body}>
-          <div style={{ width: GRID_HEIGHT, height: GRID_HEIGHT, flexShrink: 0 }}>
+          <div style={{ width: GRID_HEIGHT, height: gridHeight, flexShrink: 0 }}>
             <CrosswordGrid />
           </div>
 
-          <div style={styles.cluesColumn}>
-            <div ref={acrossCluesRef} style={{ ...styles.clueBox, height: clueScrollHeight }}>
+          <div style={{ ...styles.cluesRow, height: gridHeight }}>
+            <div ref={acrossCluesRef} style={styles.clueBox}>
               <DirectionClues direction="across" />
             </div>
-            <div ref={downCluesRef} style={{ ...styles.clueBox, height: clueScrollHeight }}>
+            <div ref={downCluesRef} style={styles.clueBox}>
               <DirectionClues direction="down" />
             </div>
-          </div>
-
-          <div style={styles.hintContainer}>
-            <HintPanel
-              clue={activeClue}
-              direction={activeDirection}
-              hintState={hintState}
-              checkResult={checkResult}
-              isSolving={isSolving}
-              onRevealHint={() => activeDirection && activeNumber && revealHint(activeDirection, activeNumber)}
-              onRevealExplanation={() => activeDirection && activeNumber && revealExplanation(activeDirection, activeNumber)}
-              onRevealAnswer={handleRevealAnswer}
-              onCheckWord={handleCheckWord}
-            />
           </div>
         </div>
       </CrosswordProvider>
@@ -617,10 +754,19 @@ const styles: Record<string, React.CSSProperties> = {
   brandLink: {
     textDecoration: 'none',
     color: 'inherit',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    marginBottom: '16px',
+  },
+  brandLogo: {
+    width: '32px',
+    height: '32px',
   },
   brand: {
-    margin: '0 0 16px 0',
+    margin: 0,
     fontSize: '42px',
+    lineHeight: 0,
     fontFamily: '"Georgia", "Times New Roman", serif',
     fontWeight: 400,
     letterSpacing: '6px',
@@ -659,6 +805,16 @@ const styles: Record<string, React.CSSProperties> = {
     margin: '4px 0 0 0',
     fontSize: '12px',
     color: '#6b7280',
+  },
+  stopBtn: {
+    marginTop: '6px',
+    padding: '4px 14px',
+    fontSize: '12px',
+    color: '#b91c1c',
+    backgroundColor: '#fef2f2',
+    border: '1px solid #fca5a5',
+    borderRadius: '4px',
+    cursor: 'pointer',
   },
   spinner: {
     width: '16px',
@@ -723,8 +879,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '16px',
     color: '#444',
     flex: 1,
-    cursor: 'pointer',
-    borderBottom: '1px dashed transparent',
+    cursor: 'text',
+    border: '1px solid #d1d5db',
+    borderRadius: '4px',
+    padding: '2px 8px',
+    backgroundColor: '#f9fafb',
   },
   nameInput: {
     fontSize: '16px',
@@ -746,26 +905,26 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#555',
     flexShrink: 0,
   },
-  progress: {
-    fontSize: '14px',
-    color: '#666',
-    cursor: 'pointer',
-    userSelect: 'none' as const,
+  timer: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
     flexShrink: 0,
   },
-  correctBadge: {
-    backgroundColor: '#f0fdf4',
-    border: '1px solid #bbf7d0',
-    borderRadius: '12px',
-    padding: '4px 12px',
-    fontSize: '13px',
-    fontWeight: 600,
-    color: '#15803d',
+  timerDisplay: {
+    fontFamily: '"SF Mono", "Menlo", monospace',
+    fontSize: '15px',
+    color: '#555',
+    minWidth: '48px',
   },
-  counterHidden: {
-    color: '#ccc',
-    fontSize: '16px',
-    letterSpacing: '2px',
+  timerToggle: {
+    background: 'none',
+    border: 'none',
+    fontSize: '14px',
+    cursor: 'pointer',
+    padding: '2px 4px',
+    color: '#888',
+    lineHeight: 1,
   },
   modalOverlay: {
     position: 'fixed' as const,
@@ -837,23 +996,21 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '24px',
     alignItems: 'flex-start',
   },
-  cluesColumn: {
+  cluesRow: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: '8px',
-    width: '280px',
-    flexShrink: 0,
+    gap: '12px',
+    flex: 1,
+    minWidth: 0,
   },
   clueBox: {
+    flex: 1,
     overflowY: 'auto',
     border: '1px solid #ddd',
     borderRadius: '6px',
     padding: '8px 12px',
     fontSize: '14px',
-  },
-  hintContainer: {
-    width: '280px',
-    flexShrink: 0,
+    minWidth: 0,
+    boxSizing: 'border-box' as const,
   },
   loading: {
     textAlign: 'center',
@@ -866,6 +1023,27 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '60px',
     fontSize: '18px',
     color: '#c44',
+  },
+  errorBanner: {
+    padding: '12px 20px',
+    backgroundColor: '#fef2f2',
+    border: '1px solid #fecaca',
+    borderRadius: '8px',
+    fontSize: '14px',
+    color: '#991b1b',
+    marginBottom: '12px',
+    width: '100%',
+    maxWidth: '1100px',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  errorBannerLink: {
+    color: '#2563eb',
+    textDecoration: 'none',
+    fontWeight: 600,
+    fontSize: '14px',
+    flexShrink: 0,
   },
   diagPanel: {
     padding: '10px 16px',

@@ -17,7 +17,7 @@ const STEP_LABELS: Record<Step, string> = {
 
 export default function UploadPage() {
   const navigate = useNavigate();
-  const { uploadPhoto, submitGridEdit, submitMask, submitManualCrop } = useUploadPipeline();
+  const { uploadPhoto, submitGridEdit, submitMask, startPipeline, submitManualCrop } = useUploadPipeline();
 
   const [step, setStep] = useState<Step>('upload');
   const [uploading, setUploading] = useState(false);
@@ -71,24 +71,14 @@ export default function UploadPage() {
     setError(null);
     setSubmittingMask(true);
     try {
-      const result = await submitMask(uploadData.session_id, data);
-      if (result.verification_passed && result.puzzle_id) {
-        // Navigate to puzzle immediately — solver runs in background
-        // CrosswordPlayer shows a progress banner while solving
-        navigate(`/puzzle/${result.puzzle_id}`);
-      } else {
-        setError(
-          `Verification failed: ${result.matched_count}/${result.grid_slot_count} slots matched. ` +
-          `OCR found ${result.ocr_clue_count} clues. ` +
-          (result.errors.length > 0 ? result.errors.join('; ') : 'Try adjusting masks and separators.')
-        );
-      }
+      const pipelineResult = await startPipeline(uploadData.session_id, data);
+      navigate(`/puzzle/${pipelineResult.puzzle_id}`);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Mask submission failed');
+      setError(err instanceof Error ? err.message : 'Pipeline start failed');
     } finally {
       setSubmittingMask(false);
     }
-  }, [uploadData, submitMask, navigate]);
+  }, [uploadData, startPipeline, navigate]);
 
   const handleGridConfirm = useCallback(async (blackCells: boolean[][]) => {
     if (!uploadData) return;
@@ -102,8 +92,9 @@ export default function UploadPage() {
       } : prev);
 
       if (ocrProvider === 'gemini') {
-        // Gemini extracts clues from raw photos — skip masking step
-        await handleMaskSubmit({ rectangles: [], separators: [] });
+        // Start full pipeline in background, navigate immediately
+        const pipelineResult = await startPipeline(uploadData.session_id, { rectangles: [], separators: [] });
+        navigate(`/puzzle/${pipelineResult.puzzle_id}`);
       } else {
         setStep('mask');
       }
@@ -112,7 +103,7 @@ export default function UploadPage() {
     } finally {
       setSubmittingGrid(false);
     }
-  }, [uploadData, submitGridEdit, ocrProvider, handleMaskSubmit]);
+  }, [uploadData, submitGridEdit, ocrProvider, startPipeline, navigate]);
 
   const handleManualCrop = useCallback(async (corners: number[][]) => {
     if (!uploadData) return;

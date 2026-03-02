@@ -9,13 +9,16 @@ export function useSSE(url: string | null) {
   useEffect(() => {
     if (!url) return;
 
+    setData(null);
+    setDone(false);
+
     const source = new EventSource(url);
     sourceRef.current = source;
 
     source.onmessage = (event) => {
       const progress: SolveProgress = JSON.parse(event.data);
       setData(progress);
-      if (progress.stage === 'complete' || progress.stage === 'failed') {
+      if (progress.stage === 'complete' || progress.stage === 'failed' || progress.stage === 'verification_failed') {
         setDone(true);
         source.close();
       }
