@@ -16,6 +16,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import anthropic
+import requests
 from loguru import logger
 
 from crosswise.solver.models import SolverInput
@@ -685,8 +686,6 @@ def prefill_from_db(
 
 def _get_dictionary_definitions(word: str) -> Optional[str]:
     """Fetch definitions from Free Dictionary API. Returns combined definition text or None."""
-    import requests
-
     try:
         resp = requests.get(
             f"https://api.dictionaryapi.dev/api/v2/entries/en/{word.lower()}",

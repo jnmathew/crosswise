@@ -404,8 +404,6 @@ export default function CrosswordPlayer() {
     });
   }, [puzzleId]);
 
-
-
   // Focus name input when entering edit mode
   useEffect(() => {
     if (editingName && nameInputRef.current) {
