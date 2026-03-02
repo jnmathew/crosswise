@@ -5,12 +5,14 @@ Wraps existing core functions for use in FastAPI endpoints.
 
 import asyncio
 import base64
+from datetime import datetime
 import json
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import cv2
 from loguru import logger
@@ -21,6 +23,16 @@ load_dotenv()
 
 from src.core.config import Settings
 from src.api.models import MaskRequest, SolveProgress, SessionStatus
+
+
+class SolveCancelled(Exception):
+    """Raised when a solve is cancelled by the user."""
+
+
+def _check_cancel(cancel_event: Optional[threading.Event]):
+    """Raise SolveCancelled if the cancel event is set."""
+    if cancel_event and cancel_event.is_set():
+        raise SolveCancelled("Solve cancelled by user")
 
 
 def _serialize_and_save_grid(cells, clue_slots, session_dir: Path) -> Dict[str, Any]:
@@ -249,6 +261,7 @@ def build_preliminary_puzzle(session_dir: Path, puzzles_dir: Path, puzzle_id: st
             "grid_size": [grid_data["rows"], grid_data["cols"]],
             "total_clues": len(matched_clues),
             "verification": "PASSED",
+            "name": f"Puzzle {datetime.now().strftime('%-m/%-d %I:%M %p')}",
         },
         "grid": {
             "rows": grid_data["rows"],
@@ -271,6 +284,121 @@ def build_preliminary_puzzle(session_dir: Path, puzzles_dir: Path, puzzle_id: st
         json.dump(puzzle, f, indent=2)
 
 
+def build_skeleton_puzzle(session_dir: Path, puzzles_dir: Path, puzzle_id: str):
+    """Build grid-only skeleton puzzle JSON with placeholder clues.
+
+    Creates a puzzle the player can load immediately while OCR runs in the background.
+    Clue slots are derived from grid_data.json with text="..." and no answers.
+    """
+    with open(session_dir / "grid_data.json") as f:
+        grid_data = json.load(f)
+
+    clues_across = []
+    clues_down = []
+    for slot in grid_data["clue_slots"]:
+        entry = {
+            "number": slot["number"],
+            "text": "...",
+            "start": slot["start"],
+            "length": slot["length"],
+            "answer": None,
+            "hint": None,
+            "explanation": None,
+        }
+        if slot["direction"] == "across":
+            clues_across.append(entry)
+        else:
+            clues_down.append(entry)
+
+    clues_across.sort(key=lambda c: c["number"])
+    clues_down.sort(key=lambda c: c["number"])
+
+    puzzle = {
+        "metadata": {
+            "source_image": "uploaded",
+            "grid_size": [grid_data["rows"], grid_data["cols"]],
+            "total_clues": len(grid_data["clue_slots"]),
+            "verification": "PENDING",
+            "name": f"Puzzle {datetime.now().strftime('%-m/%-d %I:%M %p')}",
+        },
+        "grid": {
+            "rows": grid_data["rows"],
+            "cols": grid_data["cols"],
+            "cells": grid_data["cells"],
+        },
+        "clues": {
+            "across": clues_across,
+            "down": clues_down,
+        },
+    }
+
+    puzzles_dir.mkdir(parents=True, exist_ok=True)
+    with open(puzzles_dir / f"{puzzle_id}.json", "w") as f:
+        json.dump(puzzle, f, indent=2)
+
+
+def run_full_pipeline_background(
+    session_dir: Path,
+    puzzles_dir: Path,
+    puzzle_id: str,
+    mask: "MaskRequest",
+    config: "Settings",
+    queue: asyncio.Queue,
+    session_mgr: Any,
+    session_id: str,
+    cancel_event: Optional[threading.Event] = None,
+):
+    """Background task: OCR + verify + solve + hints, with SSE progress throughout."""
+    import asyncio as _asyncio
+
+    loop = _asyncio.new_event_loop()
+
+    def put(progress: SolveProgress):
+        loop.run_until_complete(queue.put(progress))
+
+    try:
+        # Phase 1: OCR
+        session_mgr.update_status(session_id, SessionStatus.OCR_RUNNING)
+        put(SolveProgress(stage="ocr", message="Extracting clues from image...", progress=0.02))
+
+        _check_cancel(cancel_event)
+        result = run_ocr_and_verify(session_dir, mask, config)
+
+        if not result["verification_passed"]:
+            errors = result.get("errors", [])
+            session_mgr.update_status(session_id, SessionStatus.VERIFICATION_FAILED)
+            put(SolveProgress(
+                stage="verification_failed",
+                message=f"Verification failed: {result['matched_count']}/{result['grid_slot_count']} slots matched. "
+                        f"OCR found {result['ocr_clue_count']} clues. "
+                        + ("; ".join(errors) if errors else ""),
+                progress=0,
+            ))
+            return
+
+        _check_cancel(cancel_event)
+
+        # Phase 2: Build full puzzle with clues
+        put(SolveProgress(stage="verification", message="Clues verified! Building puzzle...", progress=0.05))
+        build_preliminary_puzzle(session_dir, puzzles_dir, puzzle_id)
+        session_mgr.update_status(session_id, SessionStatus.VERIFIED, puzzle_id=puzzle_id)
+
+        # Signal frontend to refetch for real clues
+        put(SolveProgress(stage="clues_ready", message="Clues loaded", progress=0.06))
+
+        # Phase 3: Solve (reuses existing _run_solve)
+        _run_solve(session_dir, puzzles_dir, puzzle_id, put, session_mgr, session_id, cancel_event)
+
+    except SolveCancelled:
+        put(SolveProgress(stage="cancelled", message="Solve cancelled", progress=0))
+        session_mgr.update_status(session_id, SessionStatus.FAILED, error="Cancelled by user")
+    except Exception as e:
+        put(SolveProgress(stage="failed", message=str(e), progress=0))
+        session_mgr.update_status(session_id, SessionStatus.FAILED, error=str(e))
+    finally:
+        loop.close()
+
+
 def run_solve_background(
     session_dir: Path,
     puzzles_dir: Path,
@@ -278,6 +406,7 @@ def run_solve_background(
     queue: asyncio.Queue,
     session_mgr: Any,
     session_id: str,
+    cancel_event: Optional[threading.Event] = None,
 ):
     """Background task: solve puzzle + generate hints, updating puzzle JSON in-place."""
     import asyncio as _asyncio
@@ -288,7 +417,10 @@ def run_solve_background(
         loop.run_until_complete(queue.put(progress))
 
     try:
-        _run_solve(session_dir, puzzles_dir, puzzle_id, put, session_mgr, session_id)
+        _run_solve(session_dir, puzzles_dir, puzzle_id, put, session_mgr, session_id, cancel_event)
+    except SolveCancelled:
+        put(SolveProgress(stage="cancelled", message="Solve cancelled", progress=0))
+        session_mgr.update_status(session_id, SessionStatus.FAILED, error="Cancelled by user")
     except Exception as e:
         put(SolveProgress(stage="failed", message=str(e), progress=0))
         session_mgr.update_status(session_id, SessionStatus.FAILED, error=str(e))
@@ -296,7 +428,7 @@ def run_solve_background(
         loop.close()
 
 
-def _generate_candidates(clue_inputs, put_progress, _elapsed):
+def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None, solve_trace=None, trace_global=None):
     """Generate, pad, and score candidate answers for all clues.
 
     Returns (candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db).
@@ -317,6 +449,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed):
         clue_text_lookup[ci.clue_id] = ci.text
 
     # Database lookup
+    _check_cancel(cancel_event)
     logger.info(f"{_elapsed()} Starting candidate generation")
     put_progress(SolveProgress(stage="candidates", message="Database lookup...", progress=0.1))
     db = ClueDatabase()
@@ -329,7 +462,17 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed):
     for cid, words in candidates.items():
         candidate_sources[cid] = {w.upper(): "db" for w in words}
 
+    # Trace: DB lookup results
+    if solve_trace:
+        db_hits = sum(1 for ci in clue_inputs if candidates.get(ci.clue_id))
+        for ci in clue_inputs:
+            count = len(candidates.get(ci.clue_id, []))
+            solve_trace[ci.clue_id]["events"].append({"phase": "db_lookup", "candidates": count})
+        if trace_global:
+            trace_global("db_lookup", f"{db_hits}/{len(clue_inputs)} clues had DB hits")
+
     # Web search pre-pass
+    _check_cancel(cancel_event)
     logger.info(f"{_elapsed()} Running web search pre-pass")
     put_progress(SolveProgress(stage="candidates", message="Web search pre-pass...", progress=0.12))
     web_candidates = web_search_prepass(clue_inputs)
@@ -342,7 +485,17 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed):
         candidate_sources.setdefault(cid, {})
         candidate_sources[cid][word.upper()] = "web"
 
+    # Trace: web search results
+    if solve_trace:
+        for ci in clue_inputs:
+            cid = ci.clue_id
+            if cid in web_candidates:
+                solve_trace[cid]["events"].append({"phase": "web_search", "result": web_candidates[cid]})
+        if trace_global:
+            trace_global("web_search", f"{len(web_candidates)} clues got web results")
+
     # Parallel Opus (zero-hit) + Sonnet padding (<5 candidates)
+    _check_cancel(cancel_event)
     clues_needing_llm = [c for c in clue_inputs if not candidates.get(c.clue_id)]
     clues_needing_pad = [c for c in clue_inputs if 0 < len(candidates.get(c.clue_id, [])) < 5]
 
@@ -390,7 +543,21 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed):
     if clues_needing_pad:
         logger.info(f"  {_elapsed()} Sonnet padded: {len(clues_needing_pad)} clues")
 
+    # Trace: LLM generation results
+    if solve_trace:
+        opus_set = set(opus_cands.keys())
+        sonnet_set = set(sonnet_cands.keys())
+        for ci in clue_inputs:
+            cid = ci.clue_id
+            if cid in opus_set:
+                solve_trace[cid]["events"].append({"phase": "opus", "candidates": len(opus_cands[cid])})
+            if cid in sonnet_set:
+                solve_trace[cid]["events"].append({"phase": "sonnet_pad", "candidates": len(sonnet_cands[cid])})
+        if trace_global:
+            trace_global("llm_generation", f"{len(opus_set)} Opus + {len(sonnet_set)} Sonnet padding")
+
     # Second-pass: catch any clues still under 5
+    _check_cancel(cancel_event)
     still_under = [c for c in clue_inputs if len(candidates.get(c.clue_id, [])) < 5]
     if still_under:
         logger.info(f"  {_elapsed()} Second-pass padding for {len(still_under)} clues still under 5")
@@ -417,10 +584,15 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed):
     for cid, sc_list in scored.items():
         candidate_scores[cid] = {sc.word: sc.confidence for sc in sc_list}
 
+    # Trace: bouncer scoring summary
+    if solve_trace and trace_global:
+        total_cands = sum(len(v) for v in candidates.values())
+        trace_global("bouncer", f"Scored {total_cands} candidates across {len(candidates)} clues")
+
     return candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db, clue_text_lookup
 
 
-def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, score_map, total, put_progress, _elapsed):
+def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, score_map, total, put_progress, _elapsed, cancel_event=None, solve_trace=None, trace_global=None):
     """Run LLM iterative solver with CSP cleanup fallback.
 
     Returns (assignment, solved_count).
@@ -428,9 +600,13 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
     from src.solver.llm_solver import solve_with_llm
     from src.solver.csp import solve_csp
 
+    _check_cancel(cancel_event)
     logger.info(f"{_elapsed()} Starting LLM iterative solver")
+    if trace_global:
+        trace_global("solver_start", f"Starting LLM solver with {total} clues")
 
     def _llm_progress(pass_num, solved_count, total_count):
+        _check_cancel(cancel_event)
         put_progress(SolveProgress(
             stage="solving",
             message=f"LLM pass {pass_num}: {solved_count}/{total_count} solved...",
@@ -442,15 +618,21 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
         max_passes=6,
         progress_callback=_llm_progress,
         candidate_scores=candidate_scores,
+        solve_trace=solve_trace,
+        trace_global=trace_global,
     )
     logger.info(f"{_elapsed()} LLM solver: {len(assignment)}/{total}")
 
     # CSP cleanup for any remaining unsolved clues
+    _check_cancel(cancel_event)
     if len(assignment) < total and len(assignment) > 0:
-        logger.info(f"{_elapsed()} Running CSP cleanup on {total - len(assignment)} remaining clues")
+        csp_remaining = total - len(assignment)
+        logger.info(f"{_elapsed()} Running CSP cleanup on {csp_remaining} remaining clues")
+        if trace_global:
+            trace_global("csp_cleanup", f"CSP cleanup for {csp_remaining} remaining clues")
         put_progress(SolveProgress(
             stage="solving",
-            message=f"CSP cleanup: {total - len(assignment)} clues remaining...",
+            message=f"CSP cleanup: {csp_remaining} clues remaining...",
             progress=0.55,
         ))
         r = solve_csp(
@@ -459,13 +641,19 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
             seed_assignment=assignment,
         )
         if len(r.assignment) > len(assignment):
+            csp_new = set(r.assignment.keys()) - set(assignment.keys())
             assignment = r.assignment
             logger.info(f"{_elapsed()} CSP cleanup: {len(assignment)}/{total}")
+            if solve_trace:
+                for cid in csp_new:
+                    solve_trace[cid]["solved_by"] = "csp_cleanup"
+            if trace_global:
+                trace_global("csp_done", f"+{len(csp_new)} from CSP, total {len(assignment)}/{total}")
 
     return assignment, len(assignment)
 
 
-def _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir):
+def _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir, solve_trace=None, global_trace=None):
     """Build and save per-clue solve diagnostics JSON."""
     from src.solver.candidate_generator import bouncer_filter
 
@@ -482,7 +670,7 @@ def _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sourc
             status = "no_candidates"
         else:
             status = "unsolved"
-        diagnostics.append({
+        entry = {
             "clue_id": cid,
             "text": clue_text_lookup.get(cid, ""),
             "length": ci.length,
@@ -499,10 +687,18 @@ def _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sourc
             "candidate_count": len(cands),
             "assigned_answer": answer,
             "status": status,
-        })
+        }
+        if solve_trace and cid in solve_trace:
+            entry["trace"] = solve_trace[cid]["events"]
+            entry["solved_by"] = solve_trace[cid]["solved_by"]
+        diagnostics.append(entry)
+
+    output = {"clues": diagnostics}
+    if global_trace:
+        output["timeline"] = global_trace
 
     with open(session_dir / "solve_diagnostics.json", "w") as f:
-        json.dump(diagnostics, f, indent=2)
+        json.dump(output, f, indent=2)
 
 
 def _generate_and_apply_hints(puzzle_data, assignment, put_progress, _elapsed):
@@ -570,6 +766,7 @@ def _run_solve(
     put_progress,
     session_mgr,
     session_id: str,
+    cancel_event: Optional[threading.Event] = None,
 ):
     """Orchestrate the full solve pipeline: candidates -> solve -> diagnostics -> hints."""
     from src.solver.solve_puzzle import build_solver_input_from_json, build_clue_inputs_from_json
@@ -582,7 +779,7 @@ def _run_solve(
     tracker = reset_tracker()
     session_mgr.update_status(session_id, SessionStatus.SOLVING)
 
-    with open(session_dir / "puzzle.json") as f:
+    with open(puzzles_dir / f"{puzzle_id}.json") as f:
         puzzle_data = json.load(f)
 
     put_progress(SolveProgress(stage="setup", message="Building solver input...", progress=0.05))
@@ -590,18 +787,31 @@ def _run_solve(
     clue_inputs = build_clue_inputs_from_json(puzzle_data, solver_input)
     total = len(clue_inputs)
 
+    # Solve trace: per-clue journey + global timeline
+    solve_trace: Dict[str, dict] = {
+        ci.clue_id: {"events": [], "solved_by": None}
+        for ci in clue_inputs
+    }
+    global_trace: List[dict] = []
+
+    def _trace_global(phase: str, summary: str):
+        global_trace.append({"t": round(time.time() - _t0, 1), "phase": phase, "summary": summary})
+
     # 1. Generate and score candidates
+    _check_cancel(cancel_event)
     candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db, clue_text_lookup = \
-        _generate_candidates(clue_inputs, put_progress, _elapsed)
+        _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event, solve_trace, _trace_global)
 
     # 2. Solve
     assignment, solved = _run_solver(
         solver_input, clue_text_lookup, candidates,
-        candidate_scores, score_map, total, put_progress, _elapsed,
+        candidate_scores, score_map, total, put_progress, _elapsed, cancel_event,
+        solve_trace, _trace_global,
     )
 
     # 3. Save diagnostics
-    _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir)
+    _trace_global("diagnostics", f"Saving diagnostics for {total} clues")
+    _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir, solve_trace, global_trace)
 
     put_progress(SolveProgress(
         stage="solved",
@@ -610,6 +820,8 @@ def _run_solve(
     ))
 
     # 4. Generate hints
+    _check_cancel(cancel_event)
+    _trace_global("hints", f"Generating hints for {solved} solved clues")
     logger.info(f"{_elapsed()} Solve complete, starting hints")
     session_mgr.update_status(session_id, SessionStatus.GENERATING_HINTS)
     _generate_and_apply_hints(puzzle_data, assignment, put_progress, _elapsed)
@@ -619,11 +831,17 @@ def _run_solve(
     with open(puzzle_path, "w") as f:
         json.dump(puzzle_data, f, indent=2)
 
+    cost_summary = tracker.summary()
+    _trace_global("complete", f"Done: {solved}/{total} solved, {cost_summary.splitlines()[0] if cost_summary else ''}")
+
     session_mgr.update_status(
         session_id, SessionStatus.COMPLETE,
         solved_count=solved, total_clues=total,
     )
 
-    logger.info(f"\n{tracker.summary()}\n")
+    # Update diagnostics with final global trace (now includes hints + cost)
+    _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir, solve_trace, global_trace)
+
+    logger.info(f"\n{cost_summary}\n")
     logger.info(f"{_elapsed()} Done")
     put_progress(SolveProgress(stage="complete", message="Puzzle ready!", progress=1.0))
