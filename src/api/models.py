@@ -80,5 +80,11 @@ class GridResizeResponse(BaseModel):
     black_cells: list[list[bool]]
 
 
+class StartPipelineResponse(BaseModel):
+    session_id: str
+    puzzle_id: str
+    status: SessionStatus
+
+
 class ManualCropRequest(BaseModel):
     corners: list[list[float]]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]

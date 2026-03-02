@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import uvicorn
@@ -16,6 +17,7 @@ from src.api.models import (
     UploadResponse,
     MaskRequest,
     MaskResponse,
+    StartPipelineResponse,
     SolveStatusResponse,
     GridEditRequest,
     GridEditResponse,
@@ -33,6 +35,7 @@ session_mgr = SessionManager(SESSIONS_DIR)
 
 # Track background solve progress per session
 progress_queues: dict[str, asyncio.Queue] = {}
+cancel_events: dict[str, threading.Event] = {}
 
 app = FastAPI(title="Crosswise API", version="0.1.0")
 
@@ -184,9 +187,12 @@ async def submit_mask(session_id: str, mask: MaskRequest, background_tasks: Back
 
     # Fire background solve
     queue: asyncio.Queue = asyncio.Queue()
+    cancel_event = threading.Event()
     progress_queues[session_id] = queue
+    cancel_events[session_id] = cancel_event
     background_tasks.add_task(
-        pipeline.run_solve_background, session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id
+        pipeline.run_solve_background, session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id,
+        cancel_event,
     )
 
     return MaskResponse(
@@ -200,44 +206,93 @@ async def submit_mask(session_id: str, mask: MaskRequest, background_tasks: Back
     )
 
 
+@app.post("/api/{session_id}/start-pipeline", response_model=StartPipelineResponse)
+async def start_pipeline(session_id: str, mask: MaskRequest, background_tasks: BackgroundTasks):
+    """Start the full OCR + solve pipeline in the background.
+
+    Creates a skeleton puzzle immediately so the player can load right away,
+    then runs OCR, verification, solving, and hint generation as a background task.
+    """
+    session_dir = session_mgr.get_session_dir(session_id)
+    puzzle_id = session_id
+
+    # Build skeleton puzzle so the player has something to load immediately
+    pipeline.build_skeleton_puzzle(session_dir, PUZZLES_DIR, puzzle_id)
+
+    # Create progress queue and start background pipeline
+    queue: asyncio.Queue = asyncio.Queue()
+    cancel_event = threading.Event()
+    progress_queues[session_id] = queue
+    cancel_events[session_id] = cancel_event
+    background_tasks.add_task(
+        pipeline.run_full_pipeline_background,
+        session_dir, PUZZLES_DIR, puzzle_id, mask, settings,
+        queue, session_mgr, session_id, cancel_event,
+    )
+
+    session_mgr.update_status(session_id, SessionStatus.OCR_RUNNING, puzzle_id=puzzle_id)
+
+    return StartPipelineResponse(
+        session_id=session_id,
+        puzzle_id=puzzle_id,
+        status=SessionStatus.OCR_RUNNING,
+    )
+
+
 @app.post("/api/{session_id}/solve")
 async def retrigger_solve(session_id: str, background_tasks: BackgroundTasks):
     """Re-trigger the solve for an existing session (e.g., after pipeline fix)."""
     session_dir = session_mgr.get_session_dir(session_id)
-    puzzlejson = session_dir / "puzzle.json"
-    if not puzzlejson.exists():
-        raise HTTPException(404, "No puzzle.json found for this session")
-
     puzzle_id = session_mgr.get_session_data(session_id).get("puzzle_id", session_id)
+    puzzle_path = PUZZLES_DIR / f"{puzzle_id}.json"
+    if not puzzle_path.exists():
+        raise HTTPException(404, "No puzzle found for this session")
 
     queue: asyncio.Queue = asyncio.Queue()
+    cancel_event = threading.Event()
     progress_queues[session_id] = queue
+    cancel_events[session_id] = cancel_event
     background_tasks.add_task(
-        pipeline.run_solve_background, session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id
+        pipeline.run_solve_background, session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id,
+        cancel_event,
     )
 
     return {"status": "solve_started", "session_id": session_id, "puzzle_id": puzzle_id}
+
+
+@app.post("/api/{session_id}/cancel")
+async def cancel_solve(session_id: str):
+    """Cancel a running background solve."""
+    event = cancel_events.get(session_id)
+    if not event:
+        raise HTTPException(404, "No active solve to cancel")
+    event.set()
+    return {"status": "cancelling", "session_id": session_id}
 
 
 @app.get("/api/{session_id}/progress")
 async def stream_progress(session_id: str):
     queue = progress_queues.get(session_id)
     if not queue:
-        # Check if already complete
         status = session_mgr.get_status(session_id)
         if status == SessionStatus.COMPLETE:
             async def done():
                 yield f'data: {{"stage":"complete","message":"Puzzle ready!","progress":1.0}}\n\n'
             return StreamingResponse(done(), media_type="text/event-stream")
+        if status in (SessionStatus.OCR_RUNNING, SessionStatus.SOLVING, SessionStatus.GENERATING_HINTS):
+            async def starting():
+                yield f'data: {{"stage":"heartbeat","message":"Pipeline starting...","progress":0}}\n\n'
+            return StreamingResponse(starting(), media_type="text/event-stream")
         raise HTTPException(404, "No active solve for this session")
 
     async def event_generator():
         while True:
             try:
                 progress = await asyncio.wait_for(queue.get(), timeout=120)
-                yield f"data: {progress.model_dumpjson()}\n\n"
-                if progress.stage in ("complete", "failed"):
+                yield f"data: {progress.model_dump_json()}\n\n"
+                if progress.stage in ("complete", "failed", "verification_failed", "cancelled"):
                     progress_queues.pop(session_id, None)
+                    cancel_events.pop(session_id, None)
                     break
             except asyncio.TimeoutError:
                 yield f'data: {{"stage":"heartbeat","message":"Still working...","progress":-1}}\n\n'
