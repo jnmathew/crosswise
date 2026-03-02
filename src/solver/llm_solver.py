@@ -898,7 +898,7 @@ def propagate_constraints(
                 runner_up_score = scored[1][1]
 
                 # Auto-commit if top candidate has strong score and clear lead
-                if top_score >= min_bouncer_score and top_score - runner_up_score >= 0.15:
+                if top_score >= min_bouncer_score and top_score - runner_up_score >= 0.1:
                     candidate_word = top_word
 
             if candidate_word:
@@ -920,6 +920,8 @@ def solve_with_llm(
     max_passes: int = 6,
     progress_callback=None,
     candidate_scores: Optional[Dict[str, Dict[str, float]]] = None,
+    solve_trace: Optional[Dict[str, dict]] = None,
+    trace_global=None,
 ) -> Dict[ClueId, Word]:
     """
     Iterative LLM-based crossword solver.
@@ -932,6 +934,11 @@ def solve_with_llm(
     assignment = prefill_from_db(solver_input, candidates)
     if assignment:
         logger.info(f"DB pre-fill: {len(assignment)}/{total} locked in")
+        if solve_trace:
+            for cid in assignment:
+                solve_trace[cid]["solved_by"] = "db_prefill"
+        if trace_global:
+            trace_global("db_prefill", f"{len(assignment)}/{total} locked in from DB")
 
     t0 = time.time()
 
@@ -967,6 +974,13 @@ def solve_with_llm(
         elapsed = time.time() - t0
         logger.info(f"[{elapsed:.1f}s] +{len(new_valid)} answers ({rejected} rejected for conflicts), total: {len(assignment)}/{total}")
 
+        if solve_trace:
+            for cid in new_valid:
+                if solve_trace[cid]["solved_by"] is None:
+                    solve_trace[cid]["solved_by"] = f"llm_pass_{pass_num}"
+        if trace_global:
+            trace_global(f"llm_pass_{pass_num}", f"+{len(new_valid)} answers ({rejected} rejected), total {len(assignment)}/{total}")
+
         if len(new_valid) == 0:
             logger.info("All new answers conflicted — stopping")
             break
@@ -986,6 +1000,12 @@ def solve_with_llm(
             logger.info(f"[{elapsed:.1f}s] +{len(prop_commits)} from constraint propagation, total: {len(assignment)}/{total}")
             for cid, word in sorted(prop_commits.items()):
                 logger.debug(f"{cid} = {word}")
+            if solve_trace:
+                for cid in prop_commits:
+                    if solve_trace[cid]["solved_by"] is None:
+                        solve_trace[cid]["solved_by"] = "constraint_prop"
+            if trace_global:
+                trace_global("constraint_prop", f"+{len(prop_commits)} from constraint propagation, total {len(assignment)}/{total}")
         else:
             logger.info("No auto-commits possible")
 
@@ -1017,6 +1037,7 @@ def solve_with_llm(
                 if new_answers:
                     # Remove blamed answers, merge in new ones
                     blamed_set = {b["clue_id"] for b in cluster["blamed"]}
+                    pre_resolve = set(assignment.keys())
                     trial = {cid: w for cid, w in assignment.items()
                              if cid not in blamed_set}
                     trial.update(new_answers)
@@ -1028,6 +1049,12 @@ def solve_with_llm(
                     elapsed = time.time() - t0
                     logger.info(f"[{elapsed:.1f}s] Resolved: {len(assignment)}/{total} "
                                f"({'+' if delta >= 0 else ''}{delta})")
+                    if solve_trace:
+                        for cid in new_answers:
+                            if cid in validated and (cid not in pre_resolve or cid in blamed_set):
+                                solve_trace[cid]["solved_by"] = "conflict_resolution"
+                    if trace_global:
+                        trace_global("conflict_resolution", f"Cluster {i+1}: {'+' if delta >= 0 else ''}{delta}, total {len(assignment)}/{total}")
                 else:
                     logger.info("No resolution found")
             # After resolving conflicts, run follow-up passes to pick up
@@ -1047,6 +1074,12 @@ def solve_with_llm(
                     assignment = validated
                     elapsed = time.time() - t0
                     logger.info(f"[{elapsed:.1f}s] +{len(new_valid)} from post-resolution, total: {len(assignment)}/{total}")
+                    if solve_trace:
+                        for cid in new_valid:
+                            if solve_trace[cid]["solved_by"] is None:
+                                solve_trace[cid]["solved_by"] = "post_resolution"
+                    if trace_global:
+                        trace_global("post_resolution", f"+{len(new_valid)} from post-resolution, total {len(assignment)}/{total}")
         else:
             logger.info("No conflict clusters detected")
 
@@ -1061,6 +1094,12 @@ def solve_with_llm(
         if final_commits:
             elapsed = time.time() - t0
             logger.info(f"[{elapsed:.1f}s] +{len(final_commits)} from final propagation, total: {len(assignment)}/{total}")
+            if solve_trace:
+                for cid in final_commits:
+                    if solve_trace[cid]["solved_by"] is None:
+                        solve_trace[cid]["solved_by"] = "constraint_prop_final"
+            if trace_global:
+                trace_global("constraint_prop_final", f"+{len(final_commits)} from final propagation, total {len(assignment)}/{total}")
 
     elapsed = time.time() - t0
     logger.info(f"[{elapsed:.1f}s] LLM solver done: {len(assignment)}/{total}")
