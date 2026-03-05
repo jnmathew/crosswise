@@ -1,9 +1,7 @@
 """Tests for benchmark harness."""
 
-import pytest
 from crosswise.solver.benchmark import run_benchmark, verify_solution, print_comparison_table
 from crosswise.solver.puzzles import get_tiny_3x3, get_mini_5x5, get_t_intersection
-from crosswise.solver.models import SolverInput
 
 
 class TestVerifySolution:

@@ -1,8 +1,7 @@
 """Tests for FastAPI API endpoints."""
 
 import json
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -195,7 +194,8 @@ class TestUpload:
         }
 
         # 1x1 white PNG
-        import struct, zlib
+        import struct
+        import zlib
         def _make_png():
             sig = b'\x89PNG\r\n\x1a\n'
             ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)

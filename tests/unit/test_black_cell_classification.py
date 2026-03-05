@@ -126,7 +126,7 @@ class TestThresholdSelection:
         # Simulate: gap_size=4.0, gap_threshold=88.8
         gap_threshold = 88.8
         gap_size = 4.0
-        percentile_threshold = 120.0
+        _percentile_threshold = 120.0  # noqa: F841 — documents test scenario
 
         # Logic: 40 <= gap_threshold <= 150 and 3 <= gap_size <= 15
         should_use_gap = (40 <= gap_threshold <= 150) and (3 <= gap_size <= 15)
@@ -163,7 +163,7 @@ class TestThresholdSelection:
         """Invalid thresholds should fall back to Otsu."""
         gap_threshold = 200  # Out of range
         percentile_threshold = 250  # Out of range
-        otsu_threshold = 57
+        _otsu_threshold = 57  # noqa: F841 — documents test scenario
 
         # Neither gap nor percentile valid
         valid_gap = (40 <= gap_threshold <= 150)

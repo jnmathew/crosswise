@@ -3,7 +3,6 @@ import pytest
 from pathlib import Path
 import cv2
 import numpy as np
-from crosswise.models import Direction
 
 
 @pytest.fixture
