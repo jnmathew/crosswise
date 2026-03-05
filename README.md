@@ -27,15 +27,15 @@ Crosswise is a high-precision crossword digitizer and autonomous solver. It tran
 - **97 tests** (91 unit, 6 integration) with GitHub Actions CI on every push
 - **~$XX cost in API calls per puzzle** (based on current Anthropic + Gemini pricing, typical grid size)
 
-<!-- ## Demo
+## Demo
 
-TODO: Add a sample puzzle so reviewers can try the player without API keys or the full database.
+A pre-solved sample puzzle is included so you can try the interactive player without API keys or the clue database:
 
 ```bash
-cd web && npm install && npm run dev
+make install
+make run-demo
 # Open http://localhost:5173
 ```
--->
 
 ## Getting started
 

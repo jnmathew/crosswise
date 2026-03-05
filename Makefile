@@ -36,6 +36,8 @@ run-web: ## Start React dev server
 test: ## Run all tests
 	uv run pytest tests/ -v
 
-run-demo: ## Start the app (backend + frontend) for demo
+run-demo: ## Try the app with a sample puzzle (no API keys needed)
+	@mkdir -p web/public/puzzles
+	@cp assets/demo/sample_puzzle.json web/public/puzzles/sample.json
 	@echo "Starting Crosswise — open http://localhost:5173"
 	@$(MAKE) run
