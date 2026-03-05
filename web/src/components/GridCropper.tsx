@@ -179,11 +179,11 @@ export default function GridCropper({ imageUrl, onSubmit, onBack, submitting }: 
       </div>
 
       <div style={styles.actions}>
-        <button style={styles.secondaryButton} onClick={onBack}>
+        <button style={styles.secondaryButton} className="btn-secondary" onClick={onBack}>
           &larr; Back to Grid Editor
         </button>
         {rect && (
-          <button style={styles.clearButton} onClick={() => setRect(null)}>
+          <button style={styles.clearButton} className="btn-clear" onClick={() => setRect(null)}>
             Clear Selection
           </button>
         )}
@@ -192,6 +192,7 @@ export default function GridCropper({ imageUrl, onSubmit, onBack, submitting }: 
             ...styles.primaryButton,
             ...((!rect || submitting) ? styles.primaryDisabled : {}),
           }}
+          className="btn-primary"
           onClick={handleSubmit}
           disabled={!rect || submitting}
         >

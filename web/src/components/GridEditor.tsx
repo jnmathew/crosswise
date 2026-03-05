@@ -184,15 +184,17 @@ export default function GridEditor({
 
   return (
     <div style={styles.container}>
-      <h2 style={styles.title}>Verify Black Cells</h2>
+      <h2 style={styles.title}>Check the Grid</h2>
       <p style={styles.subtitle}>
-        Click cells to toggle black/white. Use +/- to adjust grid dimensions.
+        Make sure the shaded cells match your crossword. Click any cell to toggle it.
+        Use +/&minus; to adjust dimensions if the grid size is wrong.
       </p>
 
       <div style={styles.dimControls}>
         <div style={styles.dimGroup}>
           <button
             style={styles.dimButton}
+            className="btn-dim"
             onClick={() => handleResize(gridData.rows - 1, gridData.cols)}
             disabled={resizing || gridData.rows <= MIN_DIM}
           >
@@ -201,6 +203,7 @@ export default function GridEditor({
           <span style={styles.dimLabel}>{gridData.rows} rows</span>
           <button
             style={styles.dimButton}
+            className="btn-dim"
             onClick={() => handleResize(gridData.rows + 1, gridData.cols)}
             disabled={resizing || gridData.rows >= MAX_DIM}
           >
@@ -210,6 +213,7 @@ export default function GridEditor({
         <div style={styles.dimGroup}>
           <button
             style={styles.dimButton}
+            className="btn-dim"
             onClick={() => handleResize(gridData.rows, gridData.cols - 1)}
             disabled={resizing || gridData.cols <= MIN_DIM}
           >
@@ -218,6 +222,7 @@ export default function GridEditor({
           <span style={styles.dimLabel}>{gridData.cols} cols</span>
           <button
             style={styles.dimButton}
+            className="btn-dim"
             onClick={() => handleResize(gridData.rows, gridData.cols + 1)}
             disabled={resizing || gridData.cols >= MAX_DIM}
           >
@@ -237,21 +242,23 @@ export default function GridEditor({
         <canvas
           ref={canvasRef}
           style={styles.canvas}
+          className="grid-canvas"
           onClick={handleCanvasClick}
         />
       </div>
 
       <div style={styles.actions}>
-        <button style={styles.secondaryButton} onClick={onBack}>
+        <button style={styles.secondaryButton} className="btn-secondary" onClick={onBack}>
           &larr; Re-upload
         </button>
         {onManualCrop && (
-          <button style={styles.cropButton} onClick={onManualCrop}>
+          <button style={styles.cropButton} className="btn-crop" onClick={onManualCrop}>
             Select grid manually
           </button>
         )}
         <button
           style={styles.primaryButton}
+          className="btn-primary"
           onClick={handleConfirm}
           disabled={submitting || resizing}
         >

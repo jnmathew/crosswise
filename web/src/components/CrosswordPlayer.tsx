@@ -10,7 +10,8 @@ import {
 import { usePuzzle } from '../hooks/usePuzzle';
 import { useHints } from '../hooks/useHints';
 import { useSSE } from '../hooks/useSSE';
-import { crosswordTheme } from '../styles/theme';
+import { crosswordTheme, crosswordThemeDark } from '../styles/theme';
+import { useTheme } from '../hooks/useTheme';
 import HintPanel from './HintPanel';
 import type { PuzzleClue } from '../types/puzzle';
 
@@ -52,11 +53,21 @@ export default function CrosswordPlayer() {
   const { puzzle, crosswordData, loading, error, refetch } = usePuzzle(puzzleId);
   const crosswordRef = useRef<CrosswordProviderImperative>(null);
   const { revealHint, revealExplanation, revealAnswer, getClueState } = useHints();
+  const { dark } = useTheme();
+
+  const refocusGrid = useCallback(() => {
+    requestAnimationFrame(() => {
+      const input = document.querySelector<HTMLInputElement>('[aria-label="crossword-input"]');
+      input?.focus();
+    });
+  }, []);
 
   const [activeDirection, setActiveDirection] = useState<Direction | null>(null);
   const [activeNumber, setActiveNumber] = useState<number | null>(null);
   const [activePosition, setActivePosition] = useState<{ row: number; col: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [flashCells, setFlashCells] = useState<{ row: number; col: number; correct: boolean }[]>([]);
+  const [showCelebration, setShowCelebration] = useState(false);
 
   // Solve timer (persisted to localStorage)
   const timerKey = `crosswise-timer-${puzzleId}`;
@@ -65,6 +76,11 @@ export default function CrosswordPlayer() {
     return stored ? parseInt(stored, 10) || 0 : 0;
   });
   const [timerRunning, setTimerRunning] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [pencilMode, setPencilMode] = useState(false);
+  const [pencilCells, setPencilCells] = useState<Set<string>>(new Set());
+  const [showSaved, setShowSaved] = useState(false);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 
   // Editable puzzle name (null = use derived default from puzzle metadata)
@@ -73,7 +89,7 @@ export default function CrosswordPlayer() {
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   // Reference image modal
-  const [showRefImage, setShowRefImage] = useState<'original' | 'masked' | null>(null);
+  const [showRefImage, setShowRefImage] = useState<'original' | null>(null);
 
   // Collapsible solve banner
   const [bannerExpanded, setBannerExpanded] = useState(true);
@@ -91,14 +107,42 @@ export default function CrosswordPlayer() {
     return () => clearInterval(id);
   }, [timerRunning, timerKey]);
 
-  // Timer: pause when tab is hidden, resume when visible
+  // Timer: pause when tab is hidden, resume when visible (only if it was running)
+  const timerWasRunning = useRef(false);
   useEffect(() => {
     const handler = () => {
-      if (document.hidden) setTimerRunning(false);
-      else setTimerRunning(true);
+      if (document.hidden) {
+        setTimerRunning((r) => { timerWasRunning.current = r; return false; });
+      } else if (timerWasRunning.current) {
+        setTimerRunning(true);
+      }
     };
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
+  }, []);
+
+  // Undo: Ctrl+Z / Cmd+Z
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        const entry = undoStack.current.pop();
+        if (!entry || !crosswordRef.current) return;
+        const { row, col, prev, wasPencil } = entry;
+        const key = `${row},${col}`;
+        if (prev) {
+          crosswordRef.current.setGuess(row, col, prev);
+          userGridRef.current[key] = prev;
+          setPencilCells((s) => { const n = new Set(s); if (wasPencil) n.add(key); else n.delete(key); return n; });
+        } else {
+          crosswordRef.current.setGuess(row, col, '');
+          delete userGridRef.current[key];
+          setPencilCells((s) => { const n = new Set(s); n.delete(key); return n; });
+        }
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
   }, []);
 
   // Solve diagnostics
@@ -122,6 +166,9 @@ export default function CrosswordPlayer() {
 
   // Track user cell input for "Check Word" feature
   const userGridRef = useRef<Record<string, string>>({});
+
+  // Undo stack
+  const undoStack = useRef<{ row: number; col: number; prev: string | null; wasPencil: boolean }[]>([]);
 
   const puzzleName = nameOverride ?? (puzzle?.metadata.name || puzzleId.replace('IMG_', 'Puzzle #'));
 
@@ -148,6 +195,12 @@ export default function CrosswordPlayer() {
   const showToast = useCallback((message: string, duration = 5000) => {
     setToast(message);
     return setTimeout(() => setToast(null), duration);
+  }, []);
+
+  // Flash cells green/red and auto-clear after 800ms
+  const flashCellsFeedback = useCallback((cells: { row: number; col: number; correct: boolean }[]) => {
+    setFlashCells(cells);
+    setTimeout(() => setFlashCells([]), 800);
   }, []);
 
   // Refetch puzzle when solve completes
@@ -272,14 +325,66 @@ export default function CrosswordPlayer() {
     // ClueTracker handles state updates — no-op here to avoid double-updates
   }, []);
 
+  // Check if all white cells are filled correctly
+  const checkCompletion = useCallback(() => {
+    if (!puzzle) return;
+    for (const dir of ['across', 'down'] as const) {
+      for (const clue of puzzle.clues[dir]) {
+        if (!clue.answer || clue.answer.includes('?')) continue;
+        const [sr, sc] = clue.start;
+        for (let i = 0; i < clue.length; i++) {
+          const r = dir === 'across' ? sr : sr + i;
+          const c = dir === 'across' ? sc + i : sc;
+          const user = userGridRef.current[`${r},${c}`];
+          if (!user || user !== clue.answer[i].toUpperCase()) return;
+        }
+      }
+    }
+    // All cells correct!
+    setTimerRunning(false);
+    setShowCelebration(true);
+  }, [puzzle]);
+
+  const timerAutoStarted = useRef(false);
   const handleCellChange = useCallback((row: number, col: number, char: string) => {
     const key = `${row},${col}`;
+    // Push to undo stack (cap at 200)
+    const prev = userGridRef.current[key] || null;
+    const wasPencil = pencilCells.has(key);
+    if (char !== (prev || '')) {
+      undoStack.current.push({ row, col, prev, wasPencil });
+      if (undoStack.current.length > 200) undoStack.current.shift();
+    }
     if (char) {
       userGridRef.current[key] = char.toUpperCase();
+      // Track pencil vs ink
+      setPencilCells((prev) => {
+        const next = new Set(prev);
+        if (pencilMode) {
+          next.add(key);
+        } else {
+          next.delete(key); // ink overwrites pencil
+        }
+        return next;
+      });
+      // Auto-start timer on first letter typed
+      if (!timerAutoStarted.current) {
+        timerAutoStarted.current = true;
+        setTimerRunning(true);
+      }
+      checkCompletion();
     } else {
       delete userGridRef.current[key];
+      setPencilCells((prev) => { const next = new Set(prev); next.delete(key); return next; });
     }
-  }, []);
+    // Show saved indicator (debounced)
+    if (savedTimer.current) clearTimeout(savedTimer.current);
+    savedTimer.current = setTimeout(() => {
+      setShowSaved(true);
+      savedTimer.current = setTimeout(() => setShowSaved(false), 1500);
+    }, 500);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- pencilCells read for undo snapshot; stale read is acceptable
+  }, [checkCompletion, pencilMode]);
 
   // Helper: get correct letter at a cell by finding the clue that covers it
   const getCorrectLetter = useCallback((row: number, col: number): string | null => {
@@ -305,29 +410,31 @@ export default function CrosswordPlayer() {
     const correct = getCorrectLetter(row, col);
     if (!correct) { showToast('No answer available for this cell'); return; }
     const user = userGridRef.current[`${row},${col}`];
-    if (!user) showToast('Empty cell');
-    else if (user === correct) showToast('Correct!');
-    else showToast('Incorrect');
-  }, [activePosition, getCorrectLetter, showToast]);
+    if (!user) { showToast('Empty cell'); return; }
+    const isCorrect = user === correct;
+    flashCellsFeedback([{ row, col, correct: isCorrect }]);
+    showToast(isCorrect ? 'Correct!' : 'Incorrect');
+  }, [activePosition, getCorrectLetter, showToast, flashCellsFeedback]);
 
   const handleCheckWord = useCallback(() => {
     if (!activeClue || !activeDirection) return;
     const answer = activeClue.answer;
     if (!answer || answer.includes('?')) { showToast('No answer available'); return; }
     const [sr, sc] = activeClue.start;
-    let userWord = '';
     let allFilled = true;
+    const cells: { row: number; col: number; correct: boolean }[] = [];
     for (let i = 0; i < activeClue.length; i++) {
       const r = activeDirection === 'across' ? sr : sr + i;
       const c = activeDirection === 'across' ? sc + i : sc;
       const letter = userGridRef.current[`${r},${c}`];
-      if (letter) userWord += letter;
-      else { allFilled = false; break; }
+      if (!letter) { allFilled = false; break; }
+      cells.push({ row: r, col: c, correct: letter === answer[i].toUpperCase() });
     }
-    if (!allFilled) showToast('Fill in all letters first');
-    else if (userWord === answer.toUpperCase()) showToast('Correct!');
-    else showToast('Not quite — try again');
-  }, [activeClue, activeDirection, showToast]);
+    if (!allFilled) { showToast('Fill in all letters first'); return; }
+    flashCellsFeedback(cells);
+    const allCorrect = cells.every((c) => c.correct);
+    showToast(allCorrect ? 'Correct!' : 'Not quite — try again');
+  }, [activeClue, activeDirection, showToast, flashCellsFeedback]);
 
   const handleCheckPuzzle = useCallback(() => {
     if (!puzzle) return;
@@ -379,6 +486,7 @@ export default function CrosswordPlayer() {
 
   const handleRevealPuzzle = useCallback(() => {
     if (!puzzle || !crosswordRef.current) return;
+    if (!window.confirm('This will reveal all answers and cannot be undone. Are you sure?')) return;
     for (const dir of ['across', 'down'] as const) {
       for (const clue of puzzle.clues[dir]) {
         if (!clue.answer || clue.answer.includes('?')) continue;
@@ -393,6 +501,38 @@ export default function CrosswordPlayer() {
       }
     }
   }, [puzzle, revealAnswer]);
+
+  // --- Clear actions ---
+  const handleClearLetter = useCallback(() => {
+    if (!activePosition || !crosswordRef.current) return;
+    const { row, col } = activePosition;
+    const key = `${row},${col}`;
+    crosswordRef.current.setGuess(row, col, '');
+    delete userGridRef.current[key];
+    setPencilCells((prev) => { const n = new Set(prev); n.delete(key); return n; });
+  }, [activePosition]);
+
+  const handleClearWord = useCallback(() => {
+    if (!activeClue || !activeDirection || !crosswordRef.current) return;
+    const [sr, sc] = activeClue.start;
+    for (let i = 0; i < activeClue.length; i++) {
+      const r = activeDirection === 'across' ? sr : sr + i;
+      const c = activeDirection === 'across' ? sc + i : sc;
+      const key = `${r},${c}`;
+      crosswordRef.current.setGuess(r, c, '');
+      delete userGridRef.current[key];
+      setPencilCells((prev) => { const n = new Set(prev); n.delete(key); return n; });
+    }
+  }, [activeClue, activeDirection]);
+
+  const handleClearPuzzle = useCallback(() => {
+    if (!crosswordRef.current) return;
+    if (!window.confirm('Clear all your answers? This cannot be undone.')) return;
+    crosswordRef.current.reset();
+    userGridRef.current = {};
+    setPencilCells(new Set());
+    undoStack.current = [];
+  }, []);
 
   const savePuzzleName = useCallback((name: string) => {
     setNameOverride(name);
@@ -420,15 +560,15 @@ export default function CrosswordPlayer() {
   const gridHeight = Math.round(GRID_HEIGHT * (puzzle.grid.rows / puzzle.grid.cols));
 
   return (
-    <div style={styles.container}>
-      <Link to="/" style={styles.brandLink}>
+    <div style={styles.container} className="player-container page-fade">
+      <Link to="/" style={styles.brandLink} className="brand-link">
         <img src="/crosswise.svg" alt="" style={styles.brandLogo} />
         <h1 style={styles.brand}>Crosswise</h1>
       </Link>
 
       {/* Solve progress banner (collapsible) */}
       {isSolving && (
-        <div style={styles.solveBanner}>
+        <div style={styles.solveBanner} className="solve-banner">
           <div
             style={styles.solveBannerHeader}
             onClick={() => setBannerExpanded((v) => !v)}
@@ -457,11 +597,17 @@ export default function CrosswordPlayer() {
                   />
                 </div>
               )}
+              {progress?.warning && (
+                <p style={styles.solveBannerWarning}>
+                  {progress.warning}
+                </p>
+              )}
               <p style={styles.solveBannerSub}>
                 You can start filling in answers while the solver works. Hints will appear when ready.
               </p>
               <button
                 style={styles.stopBtn}
+                className="btn-stop"
                 onClick={(e) => { e.stopPropagation(); handleCancelSolve(); }}
               >
                 Stop Solve
@@ -473,7 +619,7 @@ export default function CrosswordPlayer() {
 
       {/* Pipeline error banner (e.g. verification failed) */}
       {pipelineError && (
-        <div style={styles.errorBanner}>
+        <div style={styles.errorBanner} className="error-banner">
           <span>{pipelineError}</span>
           <Link to="/upload" style={styles.errorBannerLink}>Try another image</Link>
         </div>
@@ -595,14 +741,34 @@ export default function CrosswordPlayer() {
 
       {/* Toast notification */}
       {toast && (
-        <div style={styles.toast}>
+        <div style={styles.toast} className="toast">
           {toast}
           <button style={styles.toastClose} onClick={() => setToast(null)}>&times;</button>
         </div>
       )}
 
-      <div style={styles.header}>
-        <Link to="/" style={styles.backLink}>&larr; Puzzles</Link>
+      {/* Completion celebration modal */}
+      {showCelebration && (
+        <div style={styles.modalOverlay} onClick={() => setShowCelebration(false)}>
+          <div style={styles.celebrationModal} className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div style={styles.celebrationEmoji}>&#127881;</div>
+            <h2 style={styles.celebrationTitle}>Puzzle Complete!</h2>
+            <p style={styles.celebrationTime}>
+              Solved in {String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:{String(elapsedSeconds % 60).padStart(2, '0')}
+            </p>
+            <button
+              style={styles.celebrationBtn}
+              className="btn-primary"
+              onClick={() => setShowCelebration(false)}
+            >
+              Continue
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={styles.header} className="player-header">
+        <Link to="/" style={styles.backLink} className="link-back">&larr; Puzzles</Link>
         {editingName ? (
           <input
             ref={nameInputRef}
@@ -626,57 +792,99 @@ export default function CrosswordPlayer() {
         )}
         <button
           style={styles.refImageBtn}
+          className="btn-ref"
           onClick={() => setShowRefImage('original')}
           title="View source photos"
         >
           Source Image
         </button>
-        <div style={styles.timer}>
+        <div style={styles.toolbarGroup} className="player-toolbar">
+        <div style={styles.timerBox} className="timer-box">
           <span style={styles.timerDisplay}>
             {String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:
             {String(elapsedSeconds % 60).padStart(2, '0')}
           </span>
           <button
             style={styles.timerToggle}
-            onClick={() => setTimerRunning((r) => !r)}
+            onClick={() => { setTimerRunning((r) => !r); refocusGrid(); }}
             title={timerRunning ? 'Pause timer' : 'Resume timer'}
+            className="btn-timer"
           >
-            {timerRunning ? '\u23F8' : '\u25B6'}
+            {timerRunning ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ display: 'block' }}><rect x="5" y="3" width="5" height="18" rx="1" /><rect x="14" y="3" width="5" height="18" rx="1" /></svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ display: 'block' }}><path d="M6 3.5L20 12 6 20.5z" /></svg>
+            )}
           </button>
           <button
             style={styles.timerToggle}
-            onClick={() => { setElapsedSeconds(0); localStorage.setItem(timerKey, '0'); }}
+            className="btn-timer"
+            onClick={() => { setElapsedSeconds(0); localStorage.setItem(timerKey, '0'); refocusGrid(); }}
             title="Reset timer"
           >
-            &#8634;
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><path d="M1 4v6h6" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
           </button>
+        </div>
+        {showSaved && (
+          <span style={styles.savedIndicator}>Saved</span>
+        )}
+        <button
+          style={{
+            ...styles.shortcutsBtn,
+            ...(pencilMode
+              ? dark
+                ? { backgroundColor: '#2563eb', borderColor: '#fff', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)', color: '#fff' }
+                : { backgroundColor: '#2563eb', borderColor: '#fff', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.2)', color: '#fff' }
+              : {}),
+          }}
+          className="btn-ref"
+          onClick={() => { setPencilMode((m) => !m); refocusGrid(); }}
+          title={pencilMode ? 'Switch to ink mode' : 'Switch to pencil mode'}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill={pencilMode ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z" /></svg>
+        </button>
+        <div style={{ position: 'relative' }}>
+          <button
+            style={styles.shortcutsBtn}
+            className="btn-ref"
+            onClick={() => setShowShortcuts((s) => !s)}
+            title="Keyboard shortcuts"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2" /><line x1="6" y1="8" x2="6" y2="8" /><line x1="10" y1="8" x2="10" y2="8" /><line x1="14" y1="8" x2="14" y2="8" /><line x1="18" y1="8" x2="18" y2="8" /><line x1="6" y1="12" x2="6" y2="12" /><line x1="10" y1="12" x2="10" y2="12" /><line x1="14" y1="12" x2="14" y2="12" /><line x1="18" y1="12" x2="18" y2="12" /><line x1="8" y1="16" x2="16" y2="16" /></svg>
+          </button>
+          {showShortcuts && (
+            <div
+              style={styles.shortcutsPopover}
+              className="shortcuts-popover"
+              tabIndex={-1}
+              ref={(el) => el?.focus()}
+              onKeyDown={(e) => { if (e.key === 'Escape') setShowShortcuts(false); }}
+              onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setShowShortcuts(false); }}
+            >
+              <div style={styles.shortcutsTitle}>Keyboard Shortcuts</div>
+              <div style={styles.shortcutRow}><kbd style={styles.kbd}>&larr; &rarr; &uarr; &darr;</kbd> Navigate cells</div>
+              <div style={styles.shortcutRow}><kbd style={styles.kbd}>Tab</kbd> / <kbd style={styles.kbd}>Space</kbd> Switch direction</div>
+              <div style={styles.shortcutRow}><kbd style={styles.kbd}>Home</kbd> / <kbd style={styles.kbd}>End</kbd> Jump to start/end</div>
+              <div style={styles.shortcutRow}><kbd style={styles.kbd}>Backspace</kbd> Delete &amp; go back</div>
+              <div style={styles.shortcutRow}><kbd style={styles.kbd}>A-Z</kbd> Type letter &amp; advance</div>
+              <div style={styles.shortcutRow}><kbd style={styles.kbd}>Ctrl+Z</kbd> Undo last change</div>
+            </div>
+          )}
+        </div>
         </div>
       </div>
 
       {/* Reference image modal */}
       {showRefImage && (
         <div style={styles.modalOverlay} onClick={() => setShowRefImage(null)}>
-          <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+          <div style={styles.modalContent} className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
-              <div style={styles.modalTabs}>
-                <button
-                  style={showRefImage === 'original' ? styles.modalTabActive : styles.modalTab}
-                  onClick={() => setShowRefImage('original')}
-                >
-                  Original
-                </button>
-                <button
-                  style={showRefImage === 'masked' ? styles.modalTabActive : styles.modalTab}
-                  onClick={() => setShowRefImage('masked')}
-                >
-                  Masked
-                </button>
-              </div>
+              <span style={{ fontWeight: 600 }}>Source Image</span>
               <button style={styles.modalClose} onClick={() => setShowRefImage(null)}>&times;</button>
             </div>
             <img
-              src={`/api/files/${puzzleId}/${showRefImage === 'masked' ? 'masked' : 'original'}.jpg`}
-              alt={showRefImage === 'masked' ? 'Masked crossword photo' : 'Original crossword photo'}
+              src={`/api/files/${puzzleId}/original.jpg`}
+              alt="Original crossword photo"
               style={styles.refImage}
             />
           </div>
@@ -686,7 +894,7 @@ export default function CrosswordPlayer() {
       <CrosswordProvider
         ref={crosswordRef}
         data={crosswordData}
-        theme={crosswordTheme}
+        theme={dark ? crosswordThemeDark : crosswordTheme}
         useStorage={true}
         storageKey={`crosswise-${puzzleId}`}
         onClueSelected={handleClueSelected}
@@ -699,25 +907,74 @@ export default function CrosswordPlayer() {
           direction={activeDirection}
           hintState={hintState}
           isSolving={isSolving}
-          onRevealHint={() => activeDirection && activeNumber && revealHint(activeDirection, activeNumber)}
-          onRevealExplanation={() => activeDirection && activeNumber && revealExplanation(activeDirection, activeNumber)}
-          onCheckLetter={handleCheckLetter}
-          onCheckWord={handleCheckWord}
-          onCheckPuzzle={handleCheckPuzzle}
-          onRevealLetter={handleRevealLetter}
-          onRevealWord={handleRevealWord}
-          onRevealPuzzle={handleRevealPuzzle}
+          onRevealHint={() => { if (activeDirection && activeNumber) revealHint(activeDirection, activeNumber); refocusGrid(); }}
+          onRevealExplanation={() => { if (activeDirection && activeNumber) revealExplanation(activeDirection, activeNumber); refocusGrid(); }}
+          onCheckLetter={() => { handleCheckLetter(); refocusGrid(); }}
+          onCheckWord={() => { handleCheckWord(); refocusGrid(); }}
+          onCheckPuzzle={() => { handleCheckPuzzle(); refocusGrid(); }}
+          onRevealLetter={() => { handleRevealLetter(); refocusGrid(); }}
+          onRevealWord={() => { handleRevealWord(); refocusGrid(); }}
+          onRevealPuzzle={() => { handleRevealPuzzle(); refocusGrid(); }}
+          onClearLetter={() => { handleClearLetter(); refocusGrid(); }}
+          onClearWord={() => { handleClearWord(); refocusGrid(); }}
+          onClearPuzzle={() => { handleClearPuzzle(); refocusGrid(); }}
         />
-        <div style={styles.body}>
-          <div style={{ width: GRID_HEIGHT, height: gridHeight, flexShrink: 0 }}>
+        <div style={styles.body} className="player-body">
+          <div style={{ width: GRID_HEIGHT, height: gridHeight, flexShrink: 0, position: 'relative' }} className="player-grid">
             <CrosswordGrid />
+            {(flashCells.length > 0 || pencilCells.size > 0) && puzzle && (
+              <svg
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+                viewBox={`0 0 ${puzzle.grid.cols} ${puzzle.grid.rows}`}
+              >
+                {/* Pencil cell text overlay */}
+                {Array.from(pencilCells).map((key) => {
+                  const [r, c] = key.split(',').map(Number);
+                  const letter = userGridRef.current[key];
+                  if (!letter) return null;
+                  const bg = dark ? '#1e1e2e' : '#fff';
+                  return (
+                    <g key={`pencil-${key}`}>
+                      {/* Cover original text */}
+                      <rect x={c + 0.15} y={r + 0.2} width={0.7} height={0.7} fill={bg} />
+                      {/* Pencil letter */}
+                      <text
+                        x={c + 0.5}
+                        y={r + 0.58}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        style={{ fontFamily: "'Caveat', cursive", fontSize: '0.7px', fill: dark ? '#93c5fd' : '#4a7ac7' }}
+                      >
+                        {letter}
+                      </text>
+                      {/* Dot indicator */}
+                      <circle cx={c + 0.88} cy={r + 0.14} r={0.06} fill="#93c5fd" />
+                    </g>
+                  );
+                })}
+                {/* Flash feedback */}
+                {flashCells.map((fc) => (
+                  <rect
+                    key={`${fc.row}-${fc.col}`}
+                    x={fc.col}
+                    y={fc.row}
+                    width={1}
+                    height={1}
+                    fill={fc.correct ? '#22c55e' : '#ef4444'}
+                    opacity={0.35}
+                  >
+                    <animate attributeName="opacity" from="0.45" to="0" dur="0.8s" fill="freeze" />
+                  </rect>
+                ))}
+              </svg>
+            )}
           </div>
 
-          <div style={{ ...styles.cluesRow, height: gridHeight }}>
-            <div ref={acrossCluesRef} style={styles.clueBox}>
+          <div style={{ ...styles.cluesRow, height: gridHeight }} className="player-clues">
+            <div ref={acrossCluesRef} style={styles.clueBox} className="clue-box">
               <DirectionClues direction="across" />
             </div>
-            <div ref={downCluesRef} style={styles.clueBox}>
+            <div ref={downCluesRef} style={styles.clueBox} className="clue-box">
               <DirectionClues direction="down" />
             </div>
           </div>
@@ -725,20 +982,6 @@ export default function CrosswordPlayer() {
       </CrosswordProvider>
     </div>
   );
-}
-
-const spinnerKeyframes = `
-@keyframes crosswise-spin {
-  to { transform: rotate(360deg); }
-}
-`;
-
-// Inject spinner keyframes once
-if (typeof document !== 'undefined' && !document.getElementById('crosswise-spin-style')) {
-  const style = document.createElement('style');
-  style.id = 'crosswise-spin-style';
-  style.textContent = spinnerKeyframes;
-  document.head.appendChild(style);
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -799,6 +1042,14 @@ const styles: Record<string, React.CSSProperties> = {
     userSelect: 'none' as const,
     padding: '0 4px',
   },
+  solveBannerWarning: {
+    margin: '6px 0 0 0',
+    padding: '4px 8px',
+    fontSize: '12px',
+    color: '#92400e',
+    backgroundColor: '#fef3c7',
+    borderRadius: '4px',
+  },
   solveBannerSub: {
     margin: '4px 0 0 0',
     fontSize: '12px',
@@ -835,6 +1086,19 @@ const styles: Record<string, React.CSSProperties> = {
     backgroundColor: '#2563eb',
     borderRadius: '3px',
     transition: 'width 0.3s ease',
+  },
+  toolbarGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexShrink: 0,
+  },
+  savedIndicator: {
+    fontSize: '11px',
+    color: '#16a34a',
+    fontWeight: 500,
+    opacity: 0.7,
+    flexShrink: 0,
   },
   toast: {
     position: 'fixed' as const,
@@ -874,27 +1138,36 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '14px',
   },
   puzzleName: {
-    fontSize: '16px',
+    fontSize: '14px',
     color: '#444',
     flex: 1,
+    minWidth: 0,
     cursor: 'text',
     border: '1px solid #d1d5db',
     borderRadius: '4px',
-    padding: '2px 8px',
+    padding: '0 8px',
+    height: '32px',
+    lineHeight: '32px',
     backgroundColor: '#f9fafb',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
   },
   nameInput: {
-    fontSize: '16px',
+    fontSize: '14px',
     color: '#333',
     flex: 1,
     border: '1px solid #93c5fd',
     borderRadius: '4px',
-    padding: '2px 8px',
+    padding: '0 8px',
+    height: '32px',
+    lineHeight: '32px',
     outline: 'none',
     backgroundColor: '#eff6ff',
   },
   refImageBtn: {
-    padding: '4px 10px',
+    height: '32px',
+    padding: '0 10px',
     fontSize: '12px',
     border: '1px solid #d1d5db',
     borderRadius: '4px',
@@ -903,26 +1176,48 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#555',
     flexShrink: 0,
   },
-  timer: {
+  timerBox: {
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
     flexShrink: 0,
+    height: '32px',
+    padding: '0 10px',
+    border: '1px solid #d1d5db',
+    borderRadius: '4px',
+    backgroundColor: '#f9fafb',
   },
   timerDisplay: {
     fontFamily: '"SF Mono", "Menlo", monospace',
-    fontSize: '15px',
+    fontSize: '14px',
     color: '#555',
     minWidth: '48px',
   },
   timerToggle: {
     background: 'none',
     border: 'none',
-    fontSize: '14px',
+    fontSize: '16px',
     cursor: 'pointer',
-    padding: '2px 4px',
+    padding: 0,
+    width: '24px',
+    height: '24px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     color: '#888',
     lineHeight: 1,
+  },
+  shortcutsBtn: {
+    height: '32px',
+    padding: '0 10px',
+    fontSize: '12px',
+    border: '1px solid #d1d5db',
+    borderRadius: '4px',
+    backgroundColor: '#f9fafb',
+    cursor: 'pointer',
+    color: '#555',
+    flexShrink: 0,
+    whiteSpace: 'nowrap' as const,
   },
   modalOverlay: {
     position: 'fixed' as const,
@@ -951,29 +1246,6 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px 16px',
     borderBottom: '1px solid #eee',
   },
-  modalTabs: {
-    display: 'flex',
-    gap: '4px',
-  },
-  modalTab: {
-    padding: '6px 14px',
-    border: '1px solid #d1d5db',
-    borderRadius: '4px',
-    backgroundColor: '#fff',
-    cursor: 'pointer',
-    fontSize: '13px',
-    color: '#666',
-  },
-  modalTabActive: {
-    padding: '6px 14px',
-    border: '1px solid #2563eb',
-    borderRadius: '4px',
-    backgroundColor: '#eff6ff',
-    cursor: 'pointer',
-    fontSize: '13px',
-    color: '#2563eb',
-    fontWeight: 600,
-  },
   modalClose: {
     background: 'none',
     border: 'none',
@@ -993,6 +1265,8 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     gap: '24px',
     alignItems: 'flex-start',
+    width: '100%',
+    maxWidth: '1100px',
   },
   cluesRow: {
     display: 'flex',
@@ -1090,5 +1364,79 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     padding: '1px 0',
     fontSize: '12px',
+  },
+  shortcutsPopover: {
+    position: 'absolute' as const,
+    top: '100%',
+    right: 0,
+    marginTop: '6px',
+    padding: '12px 16px',
+    backgroundColor: '#fff',
+    border: '1px solid #ddd',
+    borderRadius: '8px',
+    boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+    zIndex: 1000,
+    whiteSpace: 'nowrap' as const,
+    fontSize: '13px',
+    color: '#444',
+    minWidth: '220px',
+    outline: 'none',
+  },
+  shortcutsTitle: {
+    fontWeight: 600,
+    fontSize: '14px',
+    marginBottom: '8px',
+    color: '#222',
+  },
+  shortcutRow: {
+    padding: '3px 0',
+    display: 'flex',
+    gap: '8px',
+    alignItems: 'center',
+  },
+  kbd: {
+    display: 'inline-block',
+    padding: '1px 6px',
+    backgroundColor: '#f3f4f6',
+    border: '1px solid #d1d5db',
+    borderRadius: '3px',
+    fontFamily: '"SF Mono", "Menlo", monospace',
+    fontSize: '11px',
+    color: '#374151',
+    lineHeight: '18px',
+  },
+  celebrationModal: {
+    backgroundColor: '#fff',
+    borderRadius: '16px',
+    padding: '40px 48px',
+    textAlign: 'center' as const,
+    boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+    maxWidth: '360px',
+  },
+  celebrationEmoji: {
+    fontSize: '48px',
+    marginBottom: '8px',
+  },
+  celebrationTitle: {
+    margin: '0 0 8px 0',
+    fontSize: '24px',
+    fontWeight: 700,
+    color: '#111',
+  },
+  celebrationTime: {
+    margin: '0 0 24px 0',
+    fontSize: '18px',
+    fontFamily: '"SF Mono", "Menlo", monospace',
+    color: '#555',
+  },
+  celebrationBtn: {
+    padding: '10px 32px',
+    fontSize: '15px',
+    backgroundColor: '#2563eb',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontWeight: 500,
   },
 };

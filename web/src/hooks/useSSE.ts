@@ -9,7 +9,7 @@ export function useSSE(url: string | null) {
   useEffect(() => {
     if (!url) return;
 
-    setData(null);
+    setData(null);   // eslint-disable-line react-hooks/set-state-in-effect -- reset state on URL change before subscribing
     setDone(false);
 
     const source = new EventSource(url);

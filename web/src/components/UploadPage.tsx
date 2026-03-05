@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useUploadPipeline } from '../hooks/useUploadPipeline';
 import type { UploadResponse, MaskData } from '../types/api';
 import GridEditor from './GridEditor';
@@ -64,6 +64,17 @@ export default function UploadPage() {
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) handleFile(file);
+  }, [handleFile]);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) { handleFile(file); return; }
+      }
+    }
   }, [handleFile]);
 
   const handleMaskSubmit = useCallback(async (data: MaskData) => {
@@ -132,8 +143,11 @@ export default function UploadPage() {
     : baseSteps;
 
   return (
-    <div style={styles.container}>
-      <h1 style={styles.brand}>Crosswise</h1>
+    <div style={styles.container} className="upload-container page-fade">
+      <Link to="/" style={styles.brandLink} className="brand-link">
+        <img src="/crosswise.svg" alt="" style={styles.brandLogo} />
+        <h1 style={styles.brand}>Crosswise</h1>
+      </Link>
 
       {/* Step indicator */}
       <div style={styles.steps}>
@@ -158,19 +172,26 @@ export default function UploadPage() {
             ...styles.dropZone,
             ...(dragOver ? styles.dropZoneActive : {}),
           }}
+          className="drop-zone"
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={handleDrop}
+          onPaste={handlePaste}
+          tabIndex={0}
         >
           {uploading ? (
-            <p style={styles.dropText}>Uploading &amp; detecting grid...</p>
+            <div style={styles.uploadingState}>
+              <div style={styles.spinner} />
+              <p style={styles.dropText}>Uploading &amp; detecting grid...</p>
+              <p style={styles.dropSub}>This may take a few seconds</p>
+            </div>
           ) : (
             <>
               <p style={styles.dropText}>
                 Drag &amp; drop a crossword image here
               </p>
-              <p style={styles.dropSub}>or</p>
-              <label style={styles.fileLabel}>
+              <p style={styles.dropSub}>or paste from clipboard (Ctrl+V)</p>
+              <label style={styles.fileLabel} className="btn-file">
                 Choose File
                 <input
                   type="file"
@@ -241,9 +262,23 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: '900px',
     margin: '0 auto',
   },
+  brandLink: {
+    textDecoration: 'none',
+    color: 'inherit',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '10px',
+    marginBottom: '16px',
+  },
+  brandLogo: {
+    width: '32px',
+    height: '32px',
+  },
   brand: {
-    margin: '0 0 16px 0',
+    margin: 0,
     fontSize: '42px',
+    lineHeight: 0,
     fontFamily: '"Georgia", "Times New Roman", serif',
     fontWeight: 400,
     letterSpacing: '6px',
@@ -307,5 +342,19 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '6px',
     fontSize: '15px',
     cursor: 'pointer',
+  },
+  uploadingState: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'center',
+    gap: '8px',
+  },
+  spinner: {
+    width: '28px',
+    height: '28px',
+    border: '3px solid #dbeafe',
+    borderTopColor: '#2563eb',
+    borderRadius: '50%',
+    animation: 'crosswise-spin 0.8s linear infinite',
   },
 };

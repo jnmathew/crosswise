@@ -21,6 +21,9 @@ interface HintPanelProps {
   onRevealLetter: () => void;
   onRevealWord: () => void;
   onRevealPuzzle: () => void;
+  onClearLetter: () => void;
+  onClearWord: () => void;
+  onClearPuzzle: () => void;
 }
 
 export default function HintPanel({
@@ -36,13 +39,16 @@ export default function HintPanel({
   onRevealLetter,
   onRevealWord,
   onRevealPuzzle,
+  onClearLetter,
+  onClearWord,
+  onClearPuzzle,
 }: HintPanelProps) {
   const hasSolution = clue && direction && clue.answer !== null && !clue.answer.includes('?');
   const hasHint = clue?.hint !== null;
   const hasExplanation = clue?.explanation !== null;
 
   return (
-    <div style={styles.bar}>
+    <div style={styles.bar} className="hint-bar">
       {/* Left: clue text + revealed hints */}
       <div style={styles.clueArea}>
         {!clue || !direction ? (
@@ -67,7 +73,7 @@ export default function HintPanel({
       </div>
 
       {/* Right: action buttons */}
-      <div style={styles.actions}>
+      <div style={styles.actions} className="hint-actions">
         {!hasSolution && clue && direction && isSolving && (
           <span style={styles.solvingNote}>Solving...</span>
         )}
@@ -77,7 +83,7 @@ export default function HintPanel({
             {/* Hint / Explain */}
             <div style={styles.hintButtons}>
               {hasHint && !hintState.hintRevealed && (
-                <button style={styles.btn} onClick={onRevealHint}>Hint</button>
+                <button style={styles.btn} className="btn-hint" onClick={onRevealHint}>Hint</button>
               )}
               {hasExplanation && !hintState.explanationRevealed && (
                 <button
@@ -85,6 +91,7 @@ export default function HintPanel({
                     ...styles.btn,
                     ...(hintState.hintRevealed || hintState.answerRevealed ? {} : styles.btnDisabled),
                   }}
+                  className="btn-hint"
                   onClick={onRevealExplanation}
                   disabled={!hintState.hintRevealed && !hintState.answerRevealed}
                 >
@@ -97,18 +104,26 @@ export default function HintPanel({
             <div style={styles.checkRevealStack}>
               <div style={styles.actionGroup}>
                 <span style={styles.actionLabel}>Check</span>
-                <div style={styles.segmented}>
-                  <button style={styles.segBtn} onClick={onCheckLetter}>Letter</button>
-                  <button style={styles.segBtn} onClick={onCheckWord}>Word</button>
-                  <button style={styles.segBtn} onClick={onCheckPuzzle}>Puzzle</button>
+                <div style={styles.segmented} className="segmented">
+                  <button style={styles.segBtn} className="btn-seg" onClick={onCheckLetter}>Letter</button>
+                  <button style={styles.segBtn} className="btn-seg" onClick={onCheckWord}>Word</button>
+                  <button style={styles.segBtn} className="btn-seg" onClick={onCheckPuzzle}>Puzzle</button>
                 </div>
               </div>
               <div style={styles.actionGroup}>
                 <span style={styles.actionLabel}>Reveal</span>
-                <div style={styles.segmented}>
-                  <button style={styles.segBtn} onClick={onRevealLetter}>Letter</button>
-                  <button style={styles.segBtn} onClick={onRevealWord}>Word</button>
-                  <button style={styles.segBtn} onClick={onRevealPuzzle}>Puzzle</button>
+                <div style={styles.segmented} className="segmented">
+                  <button style={styles.segBtn} className="btn-seg" onClick={onRevealLetter}>Letter</button>
+                  <button style={styles.segBtn} className="btn-seg" onClick={onRevealWord}>Word</button>
+                  <button style={styles.segBtn} className="btn-seg" onClick={onRevealPuzzle}>Puzzle</button>
+                </div>
+              </div>
+              <div style={styles.actionGroup}>
+                <span style={styles.actionLabel}>Clear</span>
+                <div style={styles.segmented} className="segmented">
+                  <button style={styles.segBtn} className="btn-seg" onClick={onClearLetter}>Letter</button>
+                  <button style={styles.segBtn} className="btn-seg" onClick={onClearWord}>Word</button>
+                  <button style={styles.segBtn} className="btn-seg" onClick={onClearPuzzle}>Puzzle</button>
                 </div>
               </div>
             </div>
@@ -202,6 +217,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px',
     color: '#666',
     fontWeight: 600,
+    width: '38px',
+    textAlign: 'right' as const,
+    flexShrink: 0,
   },
   segmented: {
     display: 'flex',

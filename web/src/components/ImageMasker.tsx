@@ -265,18 +265,21 @@ export default function ImageMasker({ imageUrl, onSubmit, submitting, exampleMas
         <div style={styles.modeGroup}>
           <button
             style={mode === 'mask' ? styles.modeActive : styles.modeButton}
+            className="btn-mode"
             onClick={() => setMode('mask')}
           >
             Mask ({rectangles.length})
           </button>
           <button
             style={mode === 'separator' ? styles.modeActive : styles.modeButton}
+            className="btn-mode"
             onClick={() => setMode('separator')}
           >
             Separator ({separators.length})
           </button>
           <button
             style={styles.helpButton}
+            className="btn-help"
             onClick={() => setShowHelp(true)}
             title="How to use the masker"
           >
@@ -284,14 +287,15 @@ export default function ImageMasker({ imageUrl, onSubmit, submitting, exampleMas
           </button>
         </div>
         <div style={styles.actionGroup}>
-          <button style={styles.actionButton} onClick={handleUndo}>
+          <button style={styles.actionButton} className="btn-secondary" onClick={handleUndo}>
             Undo
           </button>
-          <button style={styles.actionButton} onClick={handleClear}>
+          <button style={styles.actionButton} className="btn-secondary" onClick={handleClear}>
             Clear All
           </button>
           <button
             style={styles.submitButton}
+            className="btn-primary"
             onClick={handleSubmit}
             disabled={submitting}
           >

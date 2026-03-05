@@ -1,68 +1,543 @@
+/* ---- CSS custom properties (theme) ---- */
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  --bg: #fff;
+  --bg-secondary: #f9fafb;
+  --bg-tertiary: #f0f4f8;
+  --text: #222;
+  --text-secondary: #555;
+  --text-muted: #999;
+  --border: #ddd;
+  --card-bg: #fff;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --hint-bar-bg: #f0f4f8;
+  --error-bg: #fef2f2;
+  --error-text: #b91c1c;
+  --success-text: #15803d;
+  --modal-bg: #fff;
+  --input-bg: #fff;
+  --skeleton-bg: #fafafa;
+  --skeleton-bar: #e5e7eb;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+body.dark {
+  --bg: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-tertiary: #1e2740;
+  --text: #e0e0e0;
+  --text-secondary: #b0b0b0;
+  --text-muted: #777;
+  --border: #333;
+  --card-bg: #16213e;
+  --accent: #4a9eff;
+  --accent-hover: #3a8eef;
+  --hint-bar-bg: #1e2740;
+  --error-bg: #2d1b1b;
+  --error-text: #ff8a8a;
+  --success-text: #6bcf7f;
+  --modal-bg: #1e1e3a;
+  --input-bg: #16213e;
+  --skeleton-bg: #1e1e3a;
+  --skeleton-bar: #2a2a4a;
 }
-a:hover {
-  color: #535bf2;
+
+/* Reset & base */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
   min-height: 100vh;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+#root {
+  width: 100%;
 }
 
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
+/* ---- Hover states ----
+   !important is needed because all components use inline styles,
+   which always beat class selectors in specificity. */
+
+/* Puzzle cards */
+.puzzle-card {
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.puzzle-card:hover {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1) !important;
+  border-color: #bbb !important;
+}
+
+/* Primary buttons (blue) */
+.btn-primary {
+  transition: background-color 0.15s;
+}
+.btn-primary:hover:not(:disabled) {
+  background-color: #1d4ed8 !important;
+}
+
+/* Ghost / outline buttons */
+.btn-ghost {
+  transition: background-color 0.15s, color 0.15s;
+}
+.btn-ghost:hover {
+  background-color: #f3f4f6 !important;
+  color: #333 !important;
+}
+
+/* Segmented buttons (Check/Reveal) */
+.btn-seg {
+  transition: background-color 0.12s;
+}
+.btn-seg:hover {
+  background-color: #f0f4f8 !important;
+}
+
+/* Hint/Explain buttons */
+.btn-hint {
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.btn-hint:hover:not(:disabled) {
+  background-color: #f3f4f6 !important;
+  border-color: #6b7280 !important;
+}
+
+/* Re-solve button (amber) */
+.btn-resolve {
+  transition: background-color 0.15s;
+}
+.btn-resolve:hover:not(:disabled) {
+  background-color: #d97706 !important;
+}
+
+/* Stop/cancel button */
+.btn-stop {
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.btn-stop:hover {
+  background-color: #fee2e2 !important;
+  border-color: #f87171 !important;
+}
+
+/* Links */
+.link-back {
+  transition: color 0.12s;
+}
+.link-back:hover {
+  color: #1d4ed8 !important;
+  text-decoration: underline !important;
+}
+
+/* Brand link */
+.brand-link {
+  transition: opacity 0.15s;
+}
+.brand-link:hover {
+  opacity: 0.75 !important;
+}
+
+/* File upload label */
+.btn-file {
+  transition: background-color 0.15s;
   cursor: pointer;
-  transition: border-color 0.25s;
 }
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+.btn-file:hover {
+  background-color: #1d4ed8 !important;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
+/* Source image button */
+.btn-ref {
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.btn-ref:hover {
+  background-color: #e5e7eb !important;
+  border-color: #9ca3af !important;
+}
+
+/* Timer controls */
+.btn-timer {
+  transition: color 0.12s;
+}
+.btn-timer:hover {
+  color: #333 !important;
+}
+
+/* Upload link on PuzzleSelector */
+.btn-upload {
+  transition: background-color 0.15s;
+}
+.btn-upload:hover {
+  background-color: #1d4ed8 !important;
+}
+
+/* Secondary / outline buttons */
+.btn-secondary {
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.btn-secondary:hover {
+  background-color: #f3f4f6 !important;
+  border-color: #999 !important;
+}
+
+/* Dimension +/- buttons (GridEditor) */
+.btn-dim {
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.btn-dim:hover:not(:disabled) {
+  background-color: #f0f4f8 !important;
+  border-color: #999 !important;
+}
+
+/* Crop button (amber outline) */
+.btn-crop {
+  transition: background-color 0.12s;
+}
+.btn-crop:hover {
+  background-color: #fef3c7 !important;
+}
+
+/* Clear / destructive button */
+.btn-clear {
+  transition: background-color 0.12s;
+}
+.btn-clear:hover {
+  background-color: #fef2f2 !important;
+}
+
+/* Mode toggle buttons (ImageMasker) */
+.btn-mode {
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.btn-mode:hover {
+  background-color: #f0f4f8 !important;
+  border-color: #93c5fd !important;
+}
+
+/* Help button */
+.btn-help {
+  transition: background-color 0.12s;
+}
+.btn-help:hover {
+  background-color: #dbeafe !important;
+}
+
+/* ---- Dark mode overrides ---- */
+
+/* Theme toggle button */
+.theme-toggle:hover {
+  opacity: 0.8 !important;
+}
+
+/* PuzzleSelector */
+body.dark .puzzle-card {
+  background-color: var(--card-bg) !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+}
+body.dark .upload-tile {
+  border-color: var(--border) !important;
+  color: var(--text-muted) !important;
+}
+body.dark .puzzle-card:hover {
+  box-shadow: 0 2px 12px rgba(255, 255, 255, 0.06) !important;
+  border-color: #555 !important;
+}
+body.dark .puzzle-card h2 {
+  color: var(--text) !important;
+}
+body.dark .puzzle-card svg {
+  border-color: var(--border) !important;
+}
+
+/* Upload page */
+body.dark .drop-zone {
+  border-color: var(--border) !important;
+  background-color: var(--bg-secondary) !important;
+}
+
+/* HintPanel */
+body.dark .hint-bar {
+  background-color: var(--hint-bar-bg) !important;
+}
+body.dark .segmented {
+  border-color: #444 !important;
+}
+body.dark .btn-seg {
+  background-color: var(--bg-secondary) !important;
+  color: var(--text-secondary) !important;
+  border-color: #444 !important;
+}
+body.dark .btn-seg:hover {
+  background-color: var(--bg-tertiary) !important;
+}
+body.dark .btn-hint {
+  background-color: var(--bg-secondary) !important;
+  color: var(--text-secondary) !important;
+  border-color: var(--border) !important;
+}
+body.dark .btn-hint:hover:not(:disabled) {
+  background-color: var(--bg-tertiary) !important;
+  border-color: #555 !important;
+}
+
+
+/* Buttons in dark mode */
+body.dark .btn-primary,
+body.dark .btn-upload,
+body.dark .btn-file {
+  background-color: var(--accent) !important;
+}
+body.dark .btn-primary:hover:not(:disabled),
+body.dark .btn-upload:hover,
+body.dark .btn-file:hover {
+  background-color: var(--accent-hover) !important;
+}
+body.dark .btn-secondary {
+  background-color: var(--bg-secondary) !important;
+  color: var(--text-secondary) !important;
+  border-color: var(--border) !important;
+}
+body.dark .btn-secondary:hover {
+  background-color: var(--bg-tertiary) !important;
+}
+body.dark .btn-resolve {
+  background-color: #b45309 !important;
+}
+body.dark .btn-resolve:hover:not(:disabled) {
+  background-color: #92400e !important;
+}
+body.dark .btn-ref {
+  background-color: var(--bg-secondary) !important;
+  border-color: var(--border) !important;
+  color: var(--text-secondary) !important;
+}
+body.dark .btn-ref:hover {
+  background-color: var(--bg-tertiary) !important;
+}
+body.dark .btn-dim {
+  background-color: var(--bg-secondary) !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+}
+body.dark .btn-dim:hover:not(:disabled) {
+  background-color: var(--bg-tertiary) !important;
+}
+body.dark .btn-crop {
+  background-color: var(--bg-secondary) !important;
+  border-color: #92400e !important;
+  color: #fbbf24 !important;
+}
+body.dark .btn-mode {
+  background-color: var(--bg-secondary) !important;
+  border-color: var(--border) !important;
+  color: var(--text-secondary) !important;
+}
+body.dark .btn-mode:hover {
+  background-color: var(--bg-tertiary) !important;
+}
+body.dark .btn-stop {
+  border-color: #991b1b !important;
+  color: #ff8a8a !important;
+}
+body.dark .btn-stop:hover {
+  background-color: #2d1b1b !important;
+}
+body.dark .timer-box {
+  background-color: var(--bg-secondary) !important;
+  border-color: var(--border) !important;
+}
+body.dark .btn-timer {
+  color: var(--text-muted) !important;
+}
+body.dark .btn-timer:hover {
+  color: var(--text) !important;
+}
+
+/* Links */
+body.dark .link-back {
+  color: var(--text-secondary) !important;
+}
+body.dark .link-back:hover {
+  color: var(--accent) !important;
+}
+
+/* CrosswordPlayer surfaces */
+body.dark .clue-box {
+  background-color: var(--bg-secondary) !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+}
+body.dark .solve-banner {
+  background-color: #1a2540 !important;
+  border-color: #2a4a7a !important;
+  color: #7ab3ff !important;
+}
+body.dark .error-banner {
+  background-color: var(--error-bg) !important;
+  border-color: #5a2020 !important;
+  color: var(--error-text) !important;
+}
+body.dark .toast {
+  background-color: #1a3a2a !important;
+}
+body.dark .modal-content {
+  background-color: var(--modal-bg) !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+}
+body.dark .modal-content h2 {
+  color: var(--text) !important;
+}
+body.dark .modal-content p {
+  color: var(--text-secondary) !important;
+}
+body.dark .modal-content [style] {
+  border-color: var(--border) !important;
+}
+body.dark .shortcuts-popover {
+  background-color: var(--modal-bg) !important;
+  border-color: var(--border) !important;
+  color: var(--text) !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4) !important;
+}
+body.dark .shortcuts-popover div {
+  color: var(--text) !important;
+}
+body.dark .shortcuts-popover kbd {
+  background-color: var(--bg-tertiary) !important;
+  border-color: var(--border) !important;
+  color: var(--text-secondary) !important;
+}
+
+/* PuzzleSelector text */
+body.dark .selector-container p,
+body.dark .selector-container .puzzle-card span,
+body.dark .selector-container .puzzle-card div {
+  color: var(--text-secondary) !important;
+}
+
+/* UploadPage surfaces */
+body.dark .upload-container .error {
+  background-color: var(--error-bg) !important;
+  color: var(--error-text) !important;
+}
+
+/* react-crossword clue lists in dark mode */
+body.dark .clue-box .direction,
+body.dark .clue-box .direction .header,
+body.dark .clue-box .direction .clue {
+  color: var(--text) !important;
+}
+
+/* HintPanel clue text, hint text, placeholder */
+body.dark .hint-bar span {
+  color: var(--text) !important;
+}
+body.dark .hint-bar span[style*="italic"] {
+  color: var(--text-secondary) !important;
+}
+
+/* Skeleton loading pulse */
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.skeleton-pulse > div {
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+body.dark .skeleton-pulse {
+  background-color: var(--skeleton-bg) !important;
+  border-color: var(--border) !important;
+}
+body.dark .skeleton-pulse > div {
+  background-color: var(--skeleton-bar) !important;
+}
+
+/* Spinner keyframes */
+@keyframes crosswise-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Route fade-in */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.page-fade {
+  animation: fade-in 0.2s ease-out;
+}
+
+/* ---- Medium screen responsiveness ---- */
+@media (max-width: 1024px) {
+  .player-header {
+    flex-wrap: wrap !important;
   }
-  a:hover {
-    color: #747bff;
+  .player-toolbar {
+    width: 100%;
+    justify-content: flex-end !important;
   }
-  button {
-    background-color: #f9f9f9;
+}
+
+/* ---- Mobile responsiveness ---- */
+@media (max-width: 768px) {
+  /* CrosswordPlayer: stack grid + clues vertically */
+  .player-body {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+  .player-grid {
+    width: 100% !important;
+    height: auto !important;
+    max-width: 100vw;
+  }
+  .player-grid svg {
+    width: 100% !important;
+    height: auto !important;
+  }
+  .player-clues {
+    height: auto !important;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  /* Player header wraps */
+  .player-header {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+
+  /* Player container: reduce padding */
+  .player-container {
+    padding: 12px 8px !important;
+  }
+
+  /* HintPanel: stack vertically */
+  .hint-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+  .hint-actions {
+    flex-wrap: wrap !important;
+    justify-content: flex-end !important;
+  }
+
+  /* GridEditor: responsive canvas */
+  .grid-canvas {
+    width: calc(100vw - 40px) !important;
+    height: calc(100vw - 40px) !important;
+    max-width: 560px !important;
+    max-height: 560px !important;
+  }
+
+  /* PuzzleSelector: single column */
+  .puzzle-grid {
+    grid-template-columns: 1fr !important;
   }
 }

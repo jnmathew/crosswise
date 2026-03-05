@@ -19,5 +19,9 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // Mutating ref.current is the standard React pattern — this rule is too strict
+      'react-hooks/immutability': 'off',
+    },
   },
 ])

@@ -33,6 +33,7 @@ export interface SolveProgress {
   stage: string;
   message: string;
   progress: number;
+  warning?: string;
 }
 
 export interface GridEditResponse {
@@ -59,4 +60,5 @@ export interface PuzzleListEntry {
   gridSize: number[];
   totalClues: number;
   solved: number;
+  gridMask: boolean[][];
 }
