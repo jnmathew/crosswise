@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     """Application settings."""
 
     # Project paths
-    PROJECT_ROOT: Path = Path(__file__).parent.parent.parent
+    PROJECT_ROOT: Path = Path(__file__).parent.parent
     DATA_DIR: Path = PROJECT_ROOT / "data"
 
     # API

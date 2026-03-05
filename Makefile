@@ -39,5 +39,7 @@ test: ## Run all tests
 run-demo: ## Try the app with a sample puzzle (no API keys needed)
 	@mkdir -p web/public/puzzles
 	@cp assets/demo/sample_puzzle.json web/public/puzzles/sample.json
+	@mkdir -p data/sessions/sample
+	@cp assets/demo/sample_puzzle.png data/sessions/sample/original.jpg
 	@echo "Starting Crosswise — open http://localhost:5173"
 	@$(MAKE) run
