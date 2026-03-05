@@ -1,7 +1,7 @@
 # Crosswise
 
 <p align="center">
-  <img src="assets/logo/crosswise_v1_clean.svg" alt="Crosswise" width="300">
+  <img src="assets/logo/crosswise_logo.png" alt="Crosswise" width="300">
 </p>
 
 <!-- TODO: CI badge — uncomment when repo is public -->
@@ -9,7 +9,7 @@
 
 Crosswise is a high-precision crossword digitizer and autonomous solver. It transforms raw newspaper photographs into accurate, solved, and playable digital puzzles using a multi-stage AI orchestration pipeline.
 
-<!-- TODO: demo GIF — record the upload-to-solve flow -->
+![Crosswise demo](assets/demo/demo.gif)
 
 ## How it works
 
