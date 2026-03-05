@@ -158,7 +158,7 @@ def build_solver_input_from_json(data: Dict[str, Any]) -> SolverInput:
 def build_clue_inputs_from_json(
     data: Dict[str, Any],
     solver_input: Optional[SolverInput] = None,
-) -> List["ClueInput"]:
+) -> list:
     """Build ClueInput list from puzzle JSON for candidate generation."""
     from crosswise.solver.candidates import ClueInput, categorize_clue
 

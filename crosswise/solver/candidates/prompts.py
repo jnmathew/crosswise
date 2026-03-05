@@ -56,7 +56,7 @@ def _parse_response(response_text: str, clue_ids: List[str]) -> Dict[str, List[s
 
     try:
         result = json.loads(text)
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         # Try to find JSON object in text
         start = text.find("{")
         end = text.rfind("}") + 1

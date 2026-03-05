@@ -485,7 +485,7 @@ def find_quad_with_hough(image: np.ndarray, approx_quad: Optional[np.ndarray] = 
             if abs(cluster['y_avg'] - y_avg) < h_tolerance:
                 cluster['lines'].append((x1, y1, x2, y2, length))
                 cluster['y_sum'] += length
-                cluster['y_avg'] = np.mean([l[1] + l[3] for l in cluster['lines']]) / 2
+                cluster['y_avg'] = np.mean([ln[1] + ln[3] for ln in cluster['lines']]) / 2
                 placed = True
                 break
 
@@ -507,7 +507,7 @@ def find_quad_with_hough(image: np.ndarray, approx_quad: Optional[np.ndarray] = 
             if abs(cluster['x_avg'] - x_avg) < v_tolerance:
                 cluster['lines'].append((x1, y1, x2, y2, length))
                 cluster['x_sum'] += length
-                cluster['x_avg'] = np.mean([l[0] + l[2] for l in cluster['lines']]) / 2
+                cluster['x_avg'] = np.mean([ln[0] + ln[2] for ln in cluster['lines']]) / 2
                 placed = True
                 break
 
@@ -536,10 +536,10 @@ def find_quad_with_hough(image: np.ndarray, approx_quad: Optional[np.ndarray] = 
     logger.debug(f"Hough: Grid bounds h[{h_start}:{h_end}], v[{v_start}:{v_end}]")
 
     # Select boundary lines from the main grid region
-    top_h = max(h_clusters[h_start]['lines'], key=lambda l: l[4])[:4]
-    bottom_h = max(h_clusters[h_end-1]['lines'], key=lambda l: l[4])[:4]
-    left_v = max(v_clusters[v_start]['lines'], key=lambda l: l[4])[:4]
-    right_v = max(v_clusters[v_end-1]['lines'], key=lambda l: l[4])[:4]
+    top_h = max(h_clusters[h_start]['lines'], key=lambda ln: ln[4])[:4]
+    bottom_h = max(h_clusters[h_end-1]['lines'], key=lambda ln: ln[4])[:4]
+    left_v = max(v_clusters[v_start]['lines'], key=lambda ln: ln[4])[:4]
+    right_v = max(v_clusters[v_end-1]['lines'], key=lambda ln: ln[4])[:4]
 
     # Compute 4 intersections
     tl = _line_intersection(top_h, left_v)

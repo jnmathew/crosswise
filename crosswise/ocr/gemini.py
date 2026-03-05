@@ -1,9 +1,12 @@
 """Google Gemini vision provider for crossword clue extraction."""
 
+import base64
 import json
 import os
 import re
 from pathlib import Path
+
+import requests
 
 EXTRACTION_PROMPT = """\
 You are a precision OCR system for extracting crossword puzzle clues from newspaper photographs.
@@ -33,28 +36,26 @@ class GeminiOCRProvider:
         self.model = model
 
     def extract_clues(self, image_path: Path) -> str:
-        from google import genai
-
-        client = genai.Client(api_key=self.api_key)
-
         with open(image_path, "rb") as f:
-            image_bytes = f.read()
+            img_b64 = base64.b64encode(f.read()).decode()
 
         # Detect mime type from extension
         suffix = image_path.suffix.lower()
         mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
         mime_type = mime_map.get(suffix, "image/jpeg")
 
-        response = client.models.generate_content(
-            model=self.model,
-            contents=[
-                genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                EXTRACTION_PROMPT,
-            ],
-            config=genai.types.GenerateContentConfig(temperature=0),
-        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        payload = {
+            "contents": [{"parts": [
+                {"inline_data": {"mime_type": mime_type, "data": img_b64}},
+                {"text": EXTRACTION_PROMPT},
+            ]}],
+            "generationConfig": {"temperature": 0},
+        }
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
 
-        raw_text = response.text
+        raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
         # Parse JSON from response (may be wrapped in markdown code fences)
         json_match = re.search(

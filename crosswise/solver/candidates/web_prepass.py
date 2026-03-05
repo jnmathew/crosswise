@@ -128,7 +128,7 @@ def web_search_prepass(
     def _search_one(clue: ClueInput) -> Optional[tuple]:
         """Search for one clue. Returns (clue_id, answer) or None."""
         try:
-            client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
 
             prompt = (
                 f'Crossword clue: "{clue.text}" ({clue.length} letters)\n\n'

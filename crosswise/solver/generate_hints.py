@@ -56,7 +56,7 @@ Respond with ONLY the JSON array, no other text."""
 
     from crosswise.solver.cost_tracker import get_tracker
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=120.0)
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=4096,

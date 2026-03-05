@@ -55,7 +55,7 @@ def generate_with_claude(
         logger.warning("ANTHROPIC_API_KEY not set, skipping Claude generation")
         return {}
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
     all_candidates: Dict[str, List[str]] = {}
 
     def _process_batch(batch: List[ClueInput]) -> Dict[str, List[str]]:
@@ -232,7 +232,7 @@ def generate_with_extended_thinking(
         logger.warning("ANTHROPIC_API_KEY not set, skipping extended thinking")
         return {}
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
     all_results: Dict[str, List[ScoredCandidate]] = {}
 
     for i in range(0, len(clues), batch_size):

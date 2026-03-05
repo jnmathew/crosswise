@@ -3,9 +3,9 @@ Benchmark harness for testing crossword solver.
 """
 
 import statistics
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-from crosswise.solver.models import SolverInput, SolveResult
+from crosswise.solver.models import SolverInput
 from crosswise.solver.csp import solve_csp
 
 

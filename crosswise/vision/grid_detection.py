@@ -279,41 +279,66 @@ def _recover_boundary_lines(
 
     result = list(lines)
 
+    # Edge proximity threshold: if the expected boundary falls within this
+    # fraction of median_spacing from the image edge, add it as a synthetic
+    # boundary (the image edge IS the grid edge after perspective warp)
+    edge_proximity = median_spacing * 0.15
+
     # Check leading boundary (first line far from position 0)
     # Use 0.35x median as threshold — catches missing boundaries while
     # the signal strength check prevents false positives
     if lines[0] > median_spacing * 0.3:
         # Clamp expected position to valid image bounds
         expected_pos = max(0, lines[0] - int(round(median_spacing)))
-        # Search in a window around expected position, clamped to image bounds
-        search_lo = max(0, expected_pos - int(median_spacing * 0.3))
-        search_hi = min(len(signal) - 1, expected_pos + int(median_spacing * 0.3))
-        window = signal[search_lo : search_hi + 1]
-        if len(window) > 0:
-            local_peak = search_lo + int(np.argmax(window))
-            if signal[local_peak] >= min_strength:
-                logger.debug(
-                    f"{axis}-axis: recovering leading boundary at {local_peak} "
-                    f"(expected ~{expected_pos}, strength={signal[local_peak]:.0f}, min={min_strength:.0f})"
-                )
-                result.insert(0, local_peak)
+
+        if expected_pos <= edge_proximity:
+            # Expected boundary is at or very near image edge — add synthetic
+            # boundary at position 0 (grid edge coincides with warp edge)
+            logger.debug(
+                f"{axis}-axis: adding synthetic leading boundary at 0 "
+                f"(expected ~{expected_pos}, within {edge_proximity:.0f}px of edge)"
+            )
+            result.insert(0, 0)
+        else:
+            # Search in a window around expected position, clamped to image bounds
+            search_lo = max(0, expected_pos - int(median_spacing * 0.3))
+            search_hi = min(len(signal) - 1, expected_pos + int(median_spacing * 0.3))
+            window = signal[search_lo : search_hi + 1]
+            if len(window) > 0:
+                local_peak = search_lo + int(np.argmax(window))
+                if signal[local_peak] >= min_strength:
+                    logger.debug(
+                        f"{axis}-axis: recovering leading boundary at {local_peak} "
+                        f"(expected ~{expected_pos}, strength={signal[local_peak]:.0f}, min={min_strength:.0f})"
+                    )
+                    result.insert(0, local_peak)
 
     # Check trailing boundary (last line far from image edge)
     trailing_gap = image_size - 1 - lines[-1]
     if trailing_gap > median_spacing * 0.3:
         # Clamp expected position to valid image bounds
         expected_pos = min(image_size - 1, lines[-1] + int(round(median_spacing)))
-        search_lo = max(0, expected_pos - int(median_spacing * 0.3))
-        search_hi = min(len(signal) - 1, expected_pos + int(median_spacing * 0.3))
-        window = signal[search_lo : search_hi + 1]
-        if len(window) > 0:
-            local_peak = search_lo + int(np.argmax(window))
-            if signal[local_peak] >= min_strength:
-                logger.debug(
-                    f"{axis}-axis: recovering trailing boundary at {local_peak} "
-                    f"(expected ~{expected_pos}, strength={signal[local_peak]:.0f}, min={min_strength:.0f})"
-                )
-                result.append(local_peak)
+
+        if (image_size - 1 - expected_pos) <= edge_proximity:
+            # Expected boundary is at or very near image edge — add synthetic
+            boundary_pos = image_size - 1
+            logger.debug(
+                f"{axis}-axis: adding synthetic trailing boundary at {boundary_pos} "
+                f"(expected ~{expected_pos}, within {edge_proximity:.0f}px of edge)"
+            )
+            result.append(boundary_pos)
+        else:
+            search_lo = max(0, expected_pos - int(median_spacing * 0.3))
+            search_hi = min(len(signal) - 1, expected_pos + int(median_spacing * 0.3))
+            window = signal[search_lo : search_hi + 1]
+            if len(window) > 0:
+                local_peak = search_lo + int(np.argmax(window))
+                if signal[local_peak] >= min_strength:
+                    logger.debug(
+                        f"{axis}-axis: recovering trailing boundary at {local_peak} "
+                        f"(expected ~{expected_pos}, strength={signal[local_peak]:.0f}, min={min_strength:.0f})"
+                    )
+                    result.append(local_peak)
 
     return result
 

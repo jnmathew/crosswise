@@ -5,7 +5,7 @@ Pure evaluation layer -- no generation responsibility.
 
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from .models import ClueInput, ScoredCandidate
+from .models import ScoredCandidate
 
 if TYPE_CHECKING:
     from crosswise.solver.clue_database import ClueDatabase

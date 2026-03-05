@@ -260,7 +260,6 @@ def solve_pass(
             if matching:
                 cand_str = f" candidates=[{', '.join(matching[:12])}]"
 
-        known_count = sum(1 for ch in pattern if ch != "_")
         clue_lines.append(
             f"{cid}: \"{text}\" ({length} letters) pattern={pattern}{cand_str}"
         )
@@ -300,14 +299,19 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
 
     from crosswise.solver.cost_tracker import get_tracker
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=120.0)
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=SKILL_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=SKILL_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        logger.error(f"API error in solve_pass {pass_num}: {e}")
+        return None  # None signals API error (vs {} for no answers)
+
     get_tracker().track(response, f"solve_pass_{pass_num}")
 
     text = response.content[0].text.strip()
@@ -583,7 +587,7 @@ Return ONLY the JSON object."""
 
     from crosswise.solver.cost_tracker import get_tracker
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=120.0)
 
     tools = [{
         "type": "web_search_20250305",
@@ -595,28 +599,32 @@ Return ONLY the JSON object."""
 
     response = None
     tracker = get_tracker()
-    for _turn in range(4):
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=SKILL_PROMPT,
-            messages=messages,
-            tools=tools,
-        )
-        tracker.track(response, "conflict_resolution")
+    try:
+        for _turn in range(4):
+            response = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                system=SKILL_PROMPT,
+                messages=messages,
+                tools=tools,
+            )
+            tracker.track(response, "conflict_resolution")
 
-        search_count = sum(
-            1 for b in response.content
-            if getattr(b, "type", None) == "server_tool_use"
-        )
-        if search_count:
-            logger.info(f"Web searches used: {search_count}")
+            search_count = sum(
+                1 for b in response.content
+                if getattr(b, "type", None) == "server_tool_use"
+            )
+            if search_count:
+                logger.info(f"Web searches used: {search_count}")
 
-        if response.stop_reason != "pause_turn":
-            break
+            if response.stop_reason != "pause_turn":
+                break
 
-        messages.append({"role": "assistant", "content": response.content})
-        messages.append({"role": "user", "content": "Continue. Return the JSON answer."})
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": "Continue. Return the JSON answer."})
+    except Exception as e:
+        logger.error(f"API error in conflict resolution: {e}")
+        return None  # None signals API error
 
     # Extract text from mixed content blocks
     text_parts = [b.text for b in response.content if hasattr(b, "text")]
@@ -753,7 +761,7 @@ def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
         import anthropic
         from crosswise.solver.cost_tracker import get_tracker
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
 
         prompt = f'Crossword clue: "{clue_text}"\nProposed answer: {word}'
         if def_text:
@@ -957,6 +965,13 @@ def solve_with_llm(
             assignment, pass_num,
         )
 
+        if new_answers is None:
+            logger.warning(f"API error on pass {pass_num} — skipping")
+            if progress_callback:
+                progress_callback(pass_num, len(assignment), total,
+                                  warning=f"API error on pass {pass_num}, continuing with partial results")
+            continue
+
         if not new_answers:
             logger.info("No new answers — LLM is stuck")
             break
@@ -1032,6 +1047,13 @@ def solve_with_llm(
                     solver_input, clue_text_lookup, candidates,
                     assignment, cluster,
                 )
+
+                if new_answers is None:
+                    logger.warning(f"API error during conflict resolution cluster {i+1} — skipping")
+                    if progress_callback:
+                        progress_callback(max_passes, len(assignment), total,
+                                          warning="API error during conflict resolution, skipping")
+                    continue
 
                 if new_answers:
                     # Remove blamed answers, merge in new ones
