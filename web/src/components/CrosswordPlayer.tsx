@@ -77,8 +77,6 @@ export default function CrosswordPlayer() {
   });
   const [timerRunning, setTimerRunning] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [pencilMode, setPencilMode] = useState(false);
-  const [pencilCells, setPencilCells] = useState<Set<string>>(new Set());
   const [showSaved, setShowSaved] = useState(false);
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -128,16 +126,14 @@ export default function CrosswordPlayer() {
         e.preventDefault();
         const entry = undoStack.current.pop();
         if (!entry || !crosswordRef.current) return;
-        const { row, col, prev, wasPencil } = entry;
+        const { row, col, prev } = entry;
         const key = `${row},${col}`;
         if (prev) {
           crosswordRef.current.setGuess(row, col, prev);
           userGridRef.current[key] = prev;
-          setPencilCells((s) => { const n = new Set(s); if (wasPencil) n.add(key); else n.delete(key); return n; });
         } else {
           crosswordRef.current.setGuess(row, col, '');
           delete userGridRef.current[key];
-          setPencilCells((s) => { const n = new Set(s); n.delete(key); return n; });
         }
       }
     };
@@ -168,7 +164,7 @@ export default function CrosswordPlayer() {
   const userGridRef = useRef<Record<string, string>>({});
 
   // Undo stack
-  const undoStack = useRef<{ row: number; col: number; prev: string | null; wasPencil: boolean }[]>([]);
+  const undoStack = useRef<{ row: number; col: number; prev: string | null }[]>([]);
 
   const puzzleName = nameOverride ?? (puzzle?.metadata.name || puzzleId.replace('IMG_', 'Puzzle #'));
 
@@ -332,9 +328,11 @@ export default function CrosswordPlayer() {
   // Check if all white cells are filled correctly
   const checkCompletion = useCallback(() => {
     if (!puzzle) return;
+    let checked = 0;
     for (const dir of ['across', 'down'] as const) {
       for (const clue of puzzle.clues[dir]) {
         if (!clue.answer || clue.answer.includes('?')) continue;
+        checked++;
         const [sr, sc] = clue.start;
         for (let i = 0; i < clue.length; i++) {
           const r = dir === 'across' ? sr : sr + i;
@@ -344,6 +342,7 @@ export default function CrosswordPlayer() {
         }
       }
     }
+    if (checked === 0) return;
     // All cells correct!
     setTimerRunning(false);
     setShowCelebration(true);
@@ -354,23 +353,12 @@ export default function CrosswordPlayer() {
     const key = `${row},${col}`;
     // Push to undo stack (cap at 200)
     const prev = userGridRef.current[key] || null;
-    const wasPencil = pencilCells.has(key);
     if (char !== (prev || '')) {
-      undoStack.current.push({ row, col, prev, wasPencil });
+      undoStack.current.push({ row, col, prev });
       if (undoStack.current.length > 200) undoStack.current.shift();
     }
     if (char) {
       userGridRef.current[key] = char.toUpperCase();
-      // Track pencil vs ink
-      setPencilCells((prev) => {
-        const next = new Set(prev);
-        if (pencilMode) {
-          next.add(key);
-        } else {
-          next.delete(key); // ink overwrites pencil
-        }
-        return next;
-      });
       // Auto-start timer on first letter typed
       if (!timerAutoStarted.current) {
         timerAutoStarted.current = true;
@@ -379,7 +367,6 @@ export default function CrosswordPlayer() {
       checkCompletion();
     } else {
       delete userGridRef.current[key];
-      setPencilCells((prev) => { const next = new Set(prev); next.delete(key); return next; });
     }
     // Show saved indicator (debounced)
     if (savedTimer.current) clearTimeout(savedTimer.current);
@@ -387,8 +374,7 @@ export default function CrosswordPlayer() {
       setShowSaved(true);
       savedTimer.current = setTimeout(() => setShowSaved(false), 1500);
     }, 500);
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- pencilCells read for undo snapshot; stale read is acceptable
-  }, [checkCompletion, pencilMode]);
+  }, [checkCompletion]);
 
   // Helper: get correct letter at a cell by finding the clue that covers it
   const getCorrectLetter = useCallback((row: number, col: number): string | null => {
@@ -513,7 +499,6 @@ export default function CrosswordPlayer() {
     const key = `${row},${col}`;
     crosswordRef.current.setGuess(row, col, '');
     delete userGridRef.current[key];
-    setPencilCells((prev) => { const n = new Set(prev); n.delete(key); return n; });
   }, [activePosition]);
 
   const handleClearWord = useCallback(() => {
@@ -522,10 +507,8 @@ export default function CrosswordPlayer() {
     for (let i = 0; i < activeClue.length; i++) {
       const r = activeDirection === 'across' ? sr : sr + i;
       const c = activeDirection === 'across' ? sc + i : sc;
-      const key = `${r},${c}`;
       crosswordRef.current.setGuess(r, c, '');
-      delete userGridRef.current[key];
-      setPencilCells((prev) => { const n = new Set(prev); n.delete(key); return n; });
+      delete userGridRef.current[`${r},${c}`];
     }
   }, [activeClue, activeDirection]);
 
@@ -534,7 +517,6 @@ export default function CrosswordPlayer() {
     if (!window.confirm('Clear all your answers? This cannot be undone.')) return;
     crosswordRef.current.reset();
     userGridRef.current = {};
-    setPencilCells(new Set());
     undoStack.current = [];
   }, []);
 
@@ -832,21 +814,6 @@ export default function CrosswordPlayer() {
         {showSaved && (
           <span style={styles.savedIndicator}>Saved</span>
         )}
-        <button
-          style={{
-            ...styles.shortcutsBtn,
-            ...(pencilMode
-              ? dark
-                ? { backgroundColor: '#2563eb', borderColor: '#fff', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)', color: '#fff' }
-                : { backgroundColor: '#2563eb', borderColor: '#fff', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.2)', color: '#fff' }
-              : {}),
-          }}
-          className="btn-ref"
-          onClick={() => { setPencilMode((m) => !m); refocusGrid(); }}
-          title={pencilMode ? 'Switch to ink mode' : 'Switch to pencil mode'}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill={pencilMode ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z" /></svg>
-        </button>
         <div style={{ position: 'relative' }}>
           <button
             style={styles.shortcutsBtn}
@@ -927,37 +894,11 @@ export default function CrosswordPlayer() {
         <div style={styles.body} className="player-body">
           <div style={{ width: GRID_HEIGHT, height: gridHeight, flexShrink: 0, position: 'relative' }} className="player-grid">
             <CrosswordGrid />
-            {(flashCells.length > 0 || pencilCells.size > 0) && puzzle && (
+            {flashCells.length > 0 && puzzle && (
               <svg
-                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 1 }}
                 viewBox={`0 0 ${puzzle.grid.cols} ${puzzle.grid.rows}`}
               >
-                {/* Pencil cell text overlay */}
-                {Array.from(pencilCells).map((key) => {
-                  const [r, c] = key.split(',').map(Number);
-                  const letter = userGridRef.current[key];
-                  if (!letter) return null;
-                  const bg = dark ? '#1e1e2e' : '#fff';
-                  return (
-                    <g key={`pencil-${key}`}>
-                      {/* Cover original text */}
-                      <rect x={c + 0.15} y={r + 0.2} width={0.7} height={0.7} fill={bg} />
-                      {/* Pencil letter */}
-                      <text
-                        x={c + 0.5}
-                        y={r + 0.58}
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                        style={{ fontFamily: "'Caveat', cursive", fontSize: '0.7px', fill: dark ? '#93c5fd' : '#4a7ac7' }}
-                      >
-                        {letter}
-                      </text>
-                      {/* Dot indicator */}
-                      <circle cx={c + 0.88} cy={r + 0.14} r={0.06} fill="#93c5fd" />
-                    </g>
-                  );
-                })}
-                {/* Flash feedback */}
                 {flashCells.map((fc) => (
                   <rect
                     key={`${fc.row}-${fc.col}`}
