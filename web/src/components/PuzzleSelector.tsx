@@ -109,6 +109,7 @@ export default function PuzzleSelector() {
         </div>
       )}
 
+      {puzzles.length > 0 && (
       <div style={styles.grid} className="puzzle-grid">
         <Link to="/upload" style={styles.uploadCard} className="puzzle-card upload-tile">
           <div style={styles.uploadCardInner}>
@@ -166,6 +167,7 @@ export default function PuzzleSelector() {
           </Link>
         ))}
       </div>
+      )}
 
       {!loading && puzzles.length === 0 && (
         <div style={styles.emptyState}>

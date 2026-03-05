@@ -225,11 +225,15 @@ export default function CrosswordPlayer() {
   }, [solveDone, progress?.stage, refetch, showToast]);
 
   // When clues are ready (OCR complete), refetch puzzle and update crosswordData
+  const cluesRefetched = useRef(false);
   useEffect(() => {
-    if (progress?.stage === 'clues_ready') {
+    if (!progress) return;
+    if (cluesRefetched.current) return;
+    if (progress.stage === 'clues_ready' || (progress.progress ?? 0) > 0.06) {
+      cluesRefetched.current = true;
       refetch(true);
     }
-  }, [progress?.stage, refetch]);
+  }, [progress, refetch]);
 
   // Handle verification failure — show error, stop solving
   useEffect(() => {
@@ -892,6 +896,7 @@ export default function CrosswordPlayer() {
       )}
 
       <CrosswordProvider
+        key={`${puzzleId}-${puzzle.metadata.verification}`}
         ref={crosswordRef}
         data={crosswordData}
         theme={dark ? crosswordThemeDark : crosswordTheme}

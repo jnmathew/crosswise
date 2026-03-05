@@ -3,14 +3,20 @@ Configuration management using Pydantic Settings.
 Loads from environment variables and .env file.
 """
 from pathlib import Path
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PROJECT_ROOT = Path(__file__).parent.parent
+
+# Load .env into os.environ so third-party SDKs (Anthropic, Google) can find their keys
+load_dotenv(_PROJECT_ROOT / ".env")
 
 
 class Settings(BaseSettings):
     """Application settings."""
 
     # Project paths
-    PROJECT_ROOT: Path = Path(__file__).parent.parent
+    PROJECT_ROOT: Path = _PROJECT_ROOT
     DATA_DIR: Path = PROJECT_ROOT / "data"
 
     # API

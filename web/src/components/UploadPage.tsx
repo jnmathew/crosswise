@@ -190,7 +190,7 @@ export default function UploadPage() {
               <p style={styles.dropText}>
                 Drag &amp; drop a crossword image here
               </p>
-              <p style={styles.dropSub}>or paste from clipboard (Ctrl+V)</p>
+              <p style={styles.dropSub}>or paste from clipboard ({navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'}V)</p>
               <label style={styles.fileLabel} className="btn-file">
                 Choose File
                 <input

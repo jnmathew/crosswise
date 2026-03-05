@@ -29,7 +29,7 @@ from crosswise.api.session_manager import SessionManager
 from crosswise.api import pipeline
 
 SESSIONS_DIR = settings.DATA_DIR / "sessions"
-PUZZLES_DIR = Path(__file__).parent.parent.parent / "web" / "public" / "puzzles"
+PUZZLES_DIR = settings.PROJECT_ROOT / "web" / "public" / "puzzles"
 
 session_mgr = SessionManager(SESSIONS_DIR)
 
