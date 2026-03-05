@@ -23,11 +23,12 @@ uv sync --extra test # include test deps
 
 Key dependencies:
 - opencv-python, numpy (image processing, grid detection)
-- pydantic, pydantic-settings (data models, config)
+- pydantic, pydantic-settings (data models, config, .env loading)
 - fastapi, uvicorn (API server)
 - anthropic (Claude candidate generation, solving, hints)
 - google-genai (Gemini 3 Flash OCR)
 - loguru (logging)
+- python-multipart (file upload handling)
 
 ## Architecture
 
@@ -152,14 +153,22 @@ For extracting crossword clues from newspaper images:
 
 ### FastAPI Backend (`crosswise/api/`)
 
-**server.py** - API endpoints:
+**server.py** - API endpoints (15 total):
+- `GET /api/config` — Frontend configuration
 - `POST /api/upload` — Photo upload, grid detection, perspective warp
 - `POST /api/{id}/grid-edit` — User grid corrections (toggle black cells)
+- `POST /api/{id}/resize-grid` — Re-detect grid at new dimensions
+- `POST /api/{id}/manual-crop` — Manual crop coordinates
 - `POST /api/{id}/mask` — Apply masks/separators, OCR (via configured provider), verification
+- `POST /api/{id}/start-pipeline` — Start full OCR+solve pipeline
 - `POST /api/{id}/solve` — Trigger background solve with SSE progress
+- `POST /api/{id}/cancel` — Cancel running solve
 - `GET /api/{id}/progress` — SSE stream for solve/hint progress
+- `GET /api/{id}/diagnostics` — Session diagnostic info
+- `GET /api/{id}/status` — Session status (solving/complete/failed)
 - `GET /api/puzzles` — List available puzzles
 - `PATCH /api/puzzles/{id}` — Update puzzle metadata (e.g. name)
+- `DELETE /api/puzzles/{id}` — Delete a puzzle
 
 **pipeline.py** - Orchestration wrapping vision/solver functions:
 - `run_grid_detection()` — Preprocess + detect grid
@@ -174,15 +183,17 @@ For extracting crossword clues from newspaper images:
 ### React Frontend (`web/`)
 
 **Components:**
-- `CrosswordPlayer.tsx` — Main player with react-crossword, auto-scroll via CrosswordContext, editable name, togglable correct counter, photo reference modal (original + masked tabs), Check Word, background solve banner with SSE, checks session status API for re-solve SSE connection
-- `HintPanel.tsx` — Progressive hint reveal (hint → explanation → answer), Check Word button
-- `PuzzleSelector.tsx` — Dynamic puzzle list from `/api/puzzles`, re-solve button for partially-solved puzzles
-- `UploadPage.tsx` — Multi-step wizard (upload → preview → grid edit → mask → solve)
+- `CrosswordPlayer.tsx` — Main player with react-crossword, pencil mode (handwriting font), undo (Ctrl+Z), dark mode, keyboard shortcuts popover, editable name, togglable correct counter, photo reference modal, background solve banner with SSE
+- `HintPanel.tsx` — Check/Reveal/Clear actions for Letter/Word/Puzzle, progressive hint reveal (hint → explanation → answer)
+- `PuzzleSelector.tsx` — Dynamic puzzle list from `/api/puzzles`, skeleton loading, upload card tile, re-solve button for partially-solved puzzles
+- `UploadPage.tsx` — Multi-step wizard (upload → preview → grid edit → mask → solve), clipboard paste support
 - `ImageMasker.tsx` — Canvas mask/separator tool with help overlay and example image
 - `GridEditor.tsx` — Toggle black cells to fix grid detection errors
 - `GridPreview.tsx` — Confirm detected grid before proceeding
 
-**Hooks:** `usePuzzle`, `useHints`, `useSSE`, `useUploadPipeline`
+**Hooks:** `usePuzzle`, `useHints`, `useSSE`, `useTheme`, `useUploadPipeline`
+
+**Styles:** `styles/theme.ts` — light and dark crossword grid themes for react-crossword
 
 **Running the app:**
 ```bash

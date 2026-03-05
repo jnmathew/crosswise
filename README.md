@@ -17,13 +17,13 @@ Crosswise is a high-precision crossword digitizer and autonomous solver. It tran
 2. **Grid detection** — OpenCV finds the grid, corrects perspective, and computes clue numbers algorithmically from the grid geometry (no need to OCR tiny numbers inside grid)
 3. **OCR** — Gemini 3 Flash extracts clues directly from the raw photo, no preprocessing needed
 4. **Verification** — every OCR clue must match a grid slot and vice versa (100% correspondence required before solving)
-5. **Solve** — 10.1M clue database (XX% hit rate) + Haiku web search for pop culture + Claude Opus generation + LLM iterative solver with constraint propagation and conflict resolution + CSP cleanup
-6. **Play** — interactive player with Check/Reveal functionality, timer, and  hints + explanations to facilitate learning.
+5. **Solve** — Multi-stage AI solver: database lookup (10.1M clue pairs), web search for pop culture, Claude Opus iterative solving with constraint propagation, and conflict backtracking.
+6. **Play** — interactive player with Check/Reveal functionality, timer, and hints + explanations to facilitate learning.
 
 ## Key numbers
 
 - **XX% solve rate** on XX tested puzzles (mix of newspapers, 14x13 to 21x21)
-- **10.1M** historical clue/answer pairs in SQLite from 2 data sources + **605K** unique words across 2 curated crossword word lists for pattern matching and validation (see [DATASETS.md](DATASETS.md))
+- **10.1M** historical clue/answer pairs in SQLite from 2 data sources + **605K** unique words across 2 curated crossword word lists for pattern matching and validation (see [DATASETS.md](docs/DATASETS.md))
 - **97 tests** (91 unit, 6 integration) with GitHub Actions CI on every push
 - **~$XX cost in API calls per puzzle** (based on current Anthropic + Gemini pricing, typical grid size)
 
@@ -49,13 +49,12 @@ cd web && npm install && npm run dev
 ### Setup
 
 ```bash
-uv sync --extra test
-cd web && npm install && cd ..
+make install
 
 # Set ANTHROPIC_API_KEY and GEMINI_API_KEY
 cp .env.example .env
 
-# Download clue database (~1.2GB after cleanup)
+# Download clue database (~1.5GB peak, ~1GB after cleanup)
 make setup
 ```
 
@@ -110,4 +109,4 @@ web/                React + TypeScript + Vite interactive player
 
 ## Data sources
 
-The clue database combines ~9-11M deduplicated pairs from 4 sources (xd archive, CrosswordQA, Crossword Nexus, Peter Broda). See [DATASETS.md](DATASETS.md) for licensing, URLs, and details. Run `make setup` to download everything.
+The clue database combines ~9-11M deduplicated pairs from 4 sources (xd archive, CrosswordQA, Crossword Nexus, Peter Broda). See [DATASETS.md](docs/DATASETS.md) for licensing, URLs, and details. Run `make setup` to download everything.
