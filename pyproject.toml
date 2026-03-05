@@ -3,13 +3,28 @@ name = "crosswise"
 version = "0.1.0"
 description = "Crossword OCR + AI Solver with Interactive Player"
 requires-python = ">=3.11"
+dependencies = [
+    "opencv-python>=4.8.1",
+    "numpy>=1.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "anthropic>=0.7.0",
+    "google-genai>=1.0.0",
+    "python-dotenv>=1.0.1",
+    "click>=8.1.0",
+    "loguru>=0.7.0",
+    "python-multipart>=0.0.5",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.26.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.setuptools.packages.find]
-include = ["crosswise*"]
-
-[build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.build_meta"

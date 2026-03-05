@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 400" width="500" height="400">
+  <rect x="0" y="0" width="500" height="400" fill="black"/>
+
+  <rect x="302" y="2" width="96" height="96" fill="white" stroke="#333" stroke-width="4"/>
+  <rect x="302" y="102" width="96" height="96" fill="white" stroke="#333" stroke-width="4"/>
+  <rect x="2" y="202" width="96" height="96" fill="white" stroke="#333" stroke-width="4"/>
+  <rect x="102" y="202" width="96" height="96" fill="white" stroke="#333" stroke-width="4"/>
+  <rect x="202" y="202" width="96" height="96" fill="white" stroke="#333" stroke-width="4"/>
+  <rect x="302" y="202" width="96" height="96" fill="white" stroke="#333" stroke-width="4"/>
+  <rect x="402" y="202" width="96" height="96" fill="white" stroke="#333" stroke-width="4"/>
+  <rect x="302" y="302" width="96" height="96" fill="white" stroke="#333" stroke-width="4"/>
+
+  <g font-family="Arial, sans-serif" font-size="60" font-weight="bold" text-anchor="middle" fill="black">
+    <text x="50" y="270">C</text>
+    <text x="150" y="270">R</text>
+    <text x="250" y="270">O</text>
+    <text x="350" y="270">S</text>
+    <text x="450" y="270">S</text>
+    <text x="350" y="70">W</text>
+    <text x="350" y="170">I</text>
+    <text x="350" y="370">E</text>
+  </g>
+</svg>

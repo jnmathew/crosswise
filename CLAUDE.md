@@ -8,16 +8,17 @@ Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automa
 
 ## Environment
 
-**Virtual Environment**: Always use the project venv:
+**Package manager**: [uv](https://docs.astral.sh/uv/) — use `uv run` to execute commands in the project venv:
 ```bash
-.venv/bin/python3 -m crosswise.api.server
+uv run python -m crosswise.api.server
 ```
 
 ## Dependencies
 
 Install Python dependencies:
 ```bash
-.venv/bin/pip install -r requirements.txt
+uv sync              # core deps
+uv sync --extra test # include test deps
 ```
 
 Key dependencies:
@@ -186,11 +187,14 @@ For extracting crossword clues from newspaper images:
 **Running the app:**
 ```bash
 # Terminal 1: Backend
-.venv/bin/python3 -m crosswise.api.server
+uv run python -m crosswise.api.server
 
 # Terminal 2: Frontend
 cd web && npm run dev
 # Open http://localhost:5173
+
+# Or both at once:
+make run
 ```
 
 ### Data Model
