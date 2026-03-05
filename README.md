@@ -10,6 +10,7 @@
 Crosswise is a high-precision crossword digitizer and autonomous solver. It transforms raw newspaper photographs into accurate, solved, and playable digital puzzles using a multi-stage AI orchestration pipeline.
 
 ![Crosswise demo](assets/demo/demo.gif)
+*Upload a photo → grid detected → clues extracted via OCR → AI solves in real-time → play with hints*
 
 ## How it works
 
@@ -72,7 +73,7 @@ make run
 The solver uses a tiered strategy that minimizes API cost while maintaining accuracy:
 
 1. **Database lookup** — instant SQLite query finds ~70% of answers from 9-11M historical pairs
-2. **Web pre-pass** — Haiku web search identifies pop culture, celebrity, and current-event clues (~$0.01/clue)
+2. **Web pre-pass** — Haiku web search identifies pop culture, celebrity, and current-event clues
 3. **Candidate generation** — parallel Claude Opus + Sonnet calls generate candidates for remaining clues
 4. **Bouncer scoring** — cross-references all candidates against the database and word index (0.3-1.0 confidence)
 5. **LLM iterative solving** — 6 Opus passes: commit high-confidence answers, propagate crossing letters, re-solve
