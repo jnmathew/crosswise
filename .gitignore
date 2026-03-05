@@ -19,12 +19,9 @@ __pycache__/
 # Project data
 /data/
 
-# Test images (too large for git)
-src/examples/*.JPG
-src/examples/*.jpg
-
-# Debug cell extractions
-src/core/cells/
+# Development and debug images
+*.JPG
+!assets/**/*.JPG
 
 # Development and analysis scripts
 analyze_*.py
@@ -40,6 +37,11 @@ internal_dev/
 # Web app
 web/node_modules/
 web/dist/
+web/dist-ssr/
+*.local
+
+# Puzzle data (runtime-generated, may contain copyrighted content)
+web/public/puzzles/
 
 # Claude Code local state
 .claude/

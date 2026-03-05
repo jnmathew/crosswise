@@ -8,7 +8,7 @@ All data files live under `data/` (gitignored). Run `bash scripts/setup_data.sh`
 - **URL**: https://xd.saul.pw/data/xd-clues.zip
 - **Size**: 67MB zip → 242MB TSV
 - **Contents**: ~7.5M crossword clue/answer pairs from historical puzzles
-- **Path**: `data/xd/clues.tsv`
+- **Path**: `data/sources/xd/clues.tsv`
 - **License**: Public archive of published crossword data
 
 ## CrosswordQA
@@ -16,7 +16,7 @@ All data files live under `data/` (gitignored). Run `bash scripts/setup_data.sh`
 - **Source**: [albertxu/CrosswordQA](https://huggingface.co/datasets/albertxu/CrosswordQA) on HuggingFace
 - **Size**: train.csv (246MB) + valid.csv (14MB)
 - **Contents**: ~6.8M clue/answer pairs (academic dataset)
-- **Path**: `data/crosswordqa/train.csv`, `data/crosswordqa/valid.csv`
+- **Path**: `data/sources/crosswordqa/train.csv`, `data/sources/crosswordqa/valid.csv`
 - **License**: Academic research dataset
 - **Note**: Deduplicated against xd on (answer, clue_normalized) pairs during DB build
 
