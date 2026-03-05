@@ -9,7 +9,7 @@
 
 Crosswise is a high-precision crossword digitizer and autonomous solver. It transforms raw newspaper photographs into accurate, solved, and playable digital puzzles using a multi-stage AI orchestration pipeline.
 
-![Crosswise demo](assets/demo/demo.gif)
+![Crosswise demo](assets/demo/sample_puzzle_demo.gif)
 *Upload a photo → grid detected → clues extracted via OCR → AI solves in real-time → play with hints*
 
 ## How it works
