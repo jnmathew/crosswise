@@ -51,6 +51,7 @@ class SolveProgress(BaseModel):
     stage: str
     message: str
     progress: float  # 0.0 to 1.0
+    warning: Optional[str] = None
 
 
 class SolveStatusResponse(BaseModel):

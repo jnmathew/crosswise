@@ -277,11 +277,11 @@ async def stream_progress(session_id: str):
         status = session_mgr.get_status(session_id)
         if status == SessionStatus.COMPLETE:
             async def done():
-                yield f'data: {{"stage":"complete","message":"Puzzle ready!","progress":1.0}}\n\n'
+                yield 'data: {"stage":"complete","message":"Puzzle ready!","progress":1.0}\n\n'
             return StreamingResponse(done(), media_type="text/event-stream")
         if status in (SessionStatus.OCR_RUNNING, SessionStatus.SOLVING, SessionStatus.GENERATING_HINTS):
             async def starting():
-                yield f'data: {{"stage":"heartbeat","message":"Pipeline starting...","progress":0}}\n\n'
+                yield 'data: {"stage":"heartbeat","message":"Pipeline starting...","progress":0}\n\n'
             return StreamingResponse(starting(), media_type="text/event-stream")
         raise HTTPException(404, "No active solve for this session")
 
@@ -295,7 +295,7 @@ async def stream_progress(session_id: str):
                     cancel_events.pop(session_id, None)
                     break
             except asyncio.TimeoutError:
-                yield f'data: {{"stage":"heartbeat","message":"Still working...","progress":-1}}\n\n'
+                yield 'data: {"stage":"heartbeat","message":"Still working...","progress":-1}\n\n'
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -303,7 +303,10 @@ async def stream_progress(session_id: str):
 @app.get("/api/{session_id}/diagnostics")
 async def get_diagnostics(session_id: str):
     """Return per-clue solve diagnostics (candidates, sources, scores)."""
-    session_dir = session_mgr.get_session_dir(session_id)
+    try:
+        session_dir = session_mgr.get_session_dir(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Session not found")
     diag_path = session_dir / "solve_diagnostics.json"
     if not diag_path.exists():
         raise HTTPException(404, "No diagnostics available — solve has not run yet")
@@ -335,12 +338,18 @@ async def list_puzzles():
         down = clues.get("down", [])
         total = len(across) + len(down)
         solved = sum(1 for c in across + down if c.get("answer") and "?" not in c["answer"])
+        # Build compact grid mask (list of lists of booleans) for thumbnail
+        grid_data = data.get("grid", {})
+        cells = grid_data.get("cells", [])
+        grid_mask = [[c.get("is_block", False) for c in row] for row in cells] if cells else []
+
         puzzles.append({
             "id": p.stem,
             "title": meta.get("name") or meta.get("source_image", p.stem).replace(".JPG", "").replace("IMG_", "Puzzle #"),
             "gridSize": meta.get("grid_size", [0, 0]),
             "totalClues": total,
             "solved": solved,
+            "gridMask": grid_mask,
         })
     return puzzles
 
@@ -360,12 +369,23 @@ async def update_puzzle(puzzle_id: str, body: dict):
     return {"ok": True}
 
 
+@app.delete("/api/puzzles/{puzzle_id}")
+async def delete_puzzle(puzzle_id: str):
+    """Delete a puzzle JSON file."""
+    puzzle_path = PUZZLES_DIR / f"{puzzle_id}.json"
+    if not puzzle_path.exists():
+        raise HTTPException(404, "Puzzle not found")
+    puzzle_path.unlink()
+    return {"ok": True}
+
+
 def main():
     uvicorn.run(
         "crosswise.api.server:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=True,
+        reload_excludes=[".venv"],
     )
 
 
