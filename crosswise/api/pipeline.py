@@ -4,10 +4,8 @@ Wraps existing core functions for use in FastAPI endpoints.
 """
 
 import asyncio
-import base64
 from datetime import datetime
 import json
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,10 +15,6 @@ from typing import Any, Dict, List, Optional
 import cv2
 from loguru import logger
 import numpy as np
-from dotenv import load_dotenv
-
-load_dotenv()
-
 from crosswise.config import Settings
 from crosswise.api.models import MaskRequest, SolveProgress, SessionStatus
 
@@ -145,7 +139,7 @@ def resize_grid(session_dir: Path, rows: int, cols: int) -> Dict[str, Any]:
     warped_path = session_dir / "warped_gray.jpg"
     warped_gray = cv2.imread(str(warped_path), cv2.IMREAD_GRAYSCALE)
     if warped_gray is None:
-        raise FileNotFoundError(f"warped_gray.jpg not found in session directory")
+        raise FileNotFoundError("warped_gray.jpg not found in session directory")
 
     h, w = warped_gray.shape[:2]
 
@@ -156,7 +150,7 @@ def resize_grid(session_dir: Path, rows: int, cols: int) -> Dict[str, Any]:
     assign_clue_numbers(cells)
     clue_slots = compute_clue_slots(cells)
 
-    info = _serialize_and_save_grid(cells, clue_slots, session_dir)
+    _serialize_and_save_grid(cells, clue_slots, session_dir)
 
     # Also return black_cells map for the GridEditor UI
     black_cells = [
@@ -605,12 +599,13 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
     if trace_global:
         trace_global("solver_start", f"Starting LLM solver with {total} clues")
 
-    def _llm_progress(pass_num, solved_count, total_count):
+    def _llm_progress(pass_num, solved_count, total_count, warning=None):
         _check_cancel(cancel_event)
         put_progress(SolveProgress(
             stage="solving",
             message=f"LLM pass {pass_num}: {solved_count}/{total_count} solved...",
             progress=0.3 + 0.05 * pass_num,
+            warning=warning,
         ))
 
     assignment = solve_with_llm(
@@ -735,16 +730,23 @@ def _generate_and_apply_hints(puzzle_data, assignment, put_progress, _elapsed):
     ))
 
     all_hints: List[Dict[str, str]] = []
+    failed_batches = 0
     with ThreadPoolExecutor(max_workers=total_batches) as executor:
         futures = {executor.submit(generate_hints_batch, batch): i for i, batch in enumerate(batches)}
         for future in as_completed(futures):
             batch_num = futures[future] + 1
-            hints = future.result()
-            all_hints.extend(hints)
+            try:
+                hints = future.result()
+                all_hints.extend(hints)
+            except Exception as e:
+                failed_batches += 1
+                logger.error(f"Hint batch {batch_num} failed: {e}")
+            warning = f"{failed_batches} hint batch(es) failed due to API errors" if failed_batches else None
             put_progress(SolveProgress(
                 stage="hints",
                 message=f"Hints batch {batch_num}/{total_batches} done",
-                progress=0.6 + 0.35 * (len(all_hints) / len(solved_clues)),
+                progress=0.6 + 0.35 * (max(len(all_hints), 1) / len(solved_clues)),
+                warning=warning,
             ))
 
     # Map hints back to puzzle_data

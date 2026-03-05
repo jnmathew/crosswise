@@ -5,13 +5,14 @@ help: ## Show available commands
 
 install: ## Install all dependencies (including test)
 	uv sync --extra test
+	cd web && npm install && cd ..
 
-setup: ## Download data, build clue DB, clean up (~1.7GB peak, ~1.2GB after)
+setup: ## Download data, build clue DB, clean up (~1.5GB peak, ~1GB after)
 	bash scripts/setup_data.sh
 	uv run python -c "from crosswise.solver.clue_database import ClueDatabase; ClueDatabase()"
 	@echo ""
 	@echo "Cleaning up intermediate files..."
-	rm -rf data/xd data/crosswordqa
+	rm -rf data/sources
 	@echo "Done. Kept: data/clues.db + data/wordlists/"
 
 clean: ## Delete clue DB and wordlists (re-run make setup to restore)

@@ -12,10 +12,6 @@ class Settings(BaseSettings):
     # Project paths
     PROJECT_ROOT: Path = Path(__file__).parent.parent.parent
     DATA_DIR: Path = PROJECT_ROOT / "data"
-    EXAMPLES_DIR: Path = DATA_DIR / "examples"
-    OUTPUT_DIR: Path = DATA_DIR / "output"
-    CACHE_DIR: Path = DATA_DIR / "cache"
-    LOGS_DIR: Path = DATA_DIR / "logs"
 
     # API
     API_HOST: str = "0.0.0.0"
@@ -40,15 +36,7 @@ class Settings(BaseSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Create directories if they don't exist
-        for dir_path in [
-            self.DATA_DIR,
-            self.EXAMPLES_DIR,
-            self.OUTPUT_DIR,
-            self.CACHE_DIR,
-            self.LOGS_DIR,
-        ]:
-            dir_path.mkdir(parents=True, exist_ok=True)
+        self.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Global settings instance

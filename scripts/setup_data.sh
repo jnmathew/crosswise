@@ -70,7 +70,7 @@ download_file() {
 
 # ─── 1. xd clues ────────────────────────────────────────────────────────────
 
-XD_DIR="$DATA_DIR/xd"
+XD_DIR="$DATA_DIR/sources/xd"
 XD_TSV="$XD_DIR/clues.tsv"
 XD_ZIP="$XD_DIR/xd-clues.zip"
 XD_TSV_SHA256="36c83fc7837941ecb7cc3a97faef61bd3ae6fc4b81d5e379cf7b70ef11a9cdd5"
@@ -115,7 +115,7 @@ download_xd() {
 
 # ─── 2. CrosswordQA ─────────────────────────────────────────────────────────
 
-CQA_DIR="$DATA_DIR/crosswordqa"
+CQA_DIR="$DATA_DIR/sources/crosswordqa"
 CQA_TRAIN="$CQA_DIR/train.csv"
 CQA_VALID="$CQA_DIR/valid.csv"
 CQA_TRAIN_SHA256="25ada9f848e01f27b511817664fdd0b1725345a1d3b195882f379c38cd3c39fa"
@@ -197,8 +197,7 @@ main() {
     if [[ $total_missing -eq 0 ]]; then
         info "All $total_ok data files ready."
         echo ""
-        info "Next: Build the SQLite clue database:"
-        info "  make build-db"
+        info "All data sources downloaded. Run 'make setup' to build the SQLite clue database."
     else
         warn "$total_missing file(s) missing. Check errors above."
         exit 1

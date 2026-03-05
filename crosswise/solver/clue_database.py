@@ -2,15 +2,14 @@
 SQLite-backed clue database for crossword puzzle solving.
 
 Loads clue/answer pairs from two sources:
-- xd TSV (data/xd/clues.tsv) — ~7.5M historical pairs
-- CrosswordQA CSVs (data/crosswordqa/) — ~6.8M pairs from HuggingFace
+- xd TSV (data/sources/xd/clues.tsv) — ~7.5M historical pairs
+- CrosswordQA CSVs (data/sources/crosswordqa/) — ~6.8M pairs from HuggingFace
 
 Deduplicates CrosswordQA against xd on (answer, clue_normalized) pairs.
 Converts to SQLite on first load for efficient querying.
 """
 
 import csv
-import os
 import re
 import sqlite3
 from pathlib import Path
@@ -21,8 +20,8 @@ from loguru import logger
 
 
 # Default paths
-DEFAULT_XD_TSV_PATH = "data/xd/clues.tsv"
-DEFAULT_CQA_DIR = "data/crosswordqa"
+DEFAULT_XD_TSV_PATH = "data/sources/xd/clues.tsv"
+DEFAULT_CQA_DIR = "data/sources/crosswordqa"
 DEFAULT_DB_PATH = "data/clues.db"
 
 
@@ -172,7 +171,6 @@ class ClueDatabase:
 
         # Create indexes
         logger.info("Creating indexes...")
-        self._conn.execute("CREATE INDEX idx_clue_normalized ON clues(clue_normalized)")
         self._conn.execute("CREATE INDEX idx_length ON clues(length)")
         self._conn.execute("CREATE INDEX idx_answer ON clues(answer)")
         self._conn.execute("CREATE INDEX idx_clue_length ON clues(clue_normalized, length)")

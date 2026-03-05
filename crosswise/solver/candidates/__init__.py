@@ -4,10 +4,6 @@ Primary source: SQLite database (~9-11M historical pairs).
 LLM fallback: Claude Opus/Sonnet for batch generation, extended thinking for wordplay.
 """
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 # Level 0: models — dataclasses, helpers, constants
 from .models import (
     ClueInput,
@@ -37,8 +33,6 @@ from .scoring import (
 )
 from .web_prepass import (
     web_search_prepass,
-    _is_pop_culture_clue,
-    _extract_answer,
 )
 from .database import (
     generate_candidates_with_database,
