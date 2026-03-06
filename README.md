@@ -4,8 +4,8 @@
   <img src="assets/logo/crosswise_logo.png" alt="Crosswise" width="300">
 </p>
 
-<!-- TODO: CI badge — uncomment when repo is public -->
-<!-- ![CI](https://github.com/jnmathew/crosswise/actions/workflows/ci.yml/badge.svg) -->
+![CI](https://github.com/jnmathew/crosswise/actions/workflows/ci.yml/badge.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Crosswise is a high-precision crossword digitizer and autonomous solver. It transforms raw newspaper photographs into accurate, solved, and playable digital puzzles using a multi-stage AI orchestration pipeline.
 
