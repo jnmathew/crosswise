@@ -18,15 +18,19 @@ Crosswise is a high-precision crossword digitizer and autonomous solver. It tran
 2. **Grid detection** — OpenCV finds the grid, corrects perspective, and computes clue numbers algorithmically from the grid geometry (no need to OCR tiny numbers inside grid)
 3. **OCR** — Gemini 3 Flash extracts clues directly from the raw photo, no preprocessing needed
 4. **Verification** — every OCR clue must match a grid slot and vice versa (100% correspondence required before solving)
-5. **Solve** — Multi-stage AI solver: database lookup (10.1M clue pairs), web search for pop culture, Claude Opus iterative solving with constraint propagation, and conflict backtracking.
+5. **Solve** — Multi-stage AI solver: database lookup (10.1M clue pairs), web search for pop culture, Claude Opus iterative solving with constraint propagation, and automatic conflict backtracking when crossing patterns reveal wrong answers.
 6. **Play** — interactive player with Check/Reveal functionality, timer, and hints + explanations to facilitate learning.
 
 ## Key numbers
 
-- **XX% solve rate** on XX tested puzzles (mix of newspapers, 14x13 to 21x21)
-- **10.1M** historical clue/answer pairs in SQLite from 2 data sources + **605K** unique words across 2 curated crossword word lists for pattern matching and validation (see [DATASETS.md](docs/DATASETS.md))
+Tested on **39 real newspaper photographs** (14x13, 15x15, and 21x21 grids):
+
+- **2,846 / 2,888 clues solved** (98.5%) — 32 perfect solves, 7 near-perfect (86–99%), zero failures
+- **~$1.50 per puzzle** in API costs (Gemini OCR + Claude solving + hint generation)
+- **78% of clues** resolved instantly via database lookup — the LLM only handles the remaining 22%
+- **Self-correcting**: conflict backtracking detected and fixed wrong answers in 38% of puzzles
+- **10.1M** historical clue/answer pairs + **605K** unique words for pattern matching (see [DATASETS.md](docs/DATASETS.md))
 - **97 tests** (91 unit, 6 integration) with GitHub Actions CI on every push
-- **~$XX cost in API calls per puzzle** (based on current Anthropic + Gemini pricing, typical grid size)
 
 ## Demo
 
@@ -72,7 +76,7 @@ make run
 
 The solver uses a tiered strategy that minimizes API cost while maintaining accuracy:
 
-1. **Database lookup** — instant SQLite query finds ~70% of answers from 9-11M historical pairs
+1. **Database lookup** — instant SQLite query resolves ~78% of clues from 10.1M historical pairs
 2. **Web pre-pass** — Haiku web search identifies pop culture, celebrity, and current-event clues
 3. **Candidate generation** — parallel Claude Opus + Sonnet calls generate candidates for remaining clues
 4. **Bouncer scoring** — cross-references all candidates against the database and word index (0.3-1.0 confidence)
