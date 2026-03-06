@@ -17,6 +17,11 @@ Crosswise is a high-precision crossword digitizer and autonomous solver. Printed
 
 ## How it works
 
+```
+Photo → Grid Detection (OpenCV) → Clue Extraction (Gemini OCR) → Verification
+  → Candidate Generation → Iterative Solver (Claude) → CSP Cleanup → Playable Puzzle
+```
+
 1. **Upload** a photo of a printed crossword
 2. **Grid detection** — OpenCV finds the grid, corrects perspective, and computes clue numbers algorithmically from the grid geometry (no need to OCR tiny numbers inside grid)
 3. **OCR** — Gemini 3 Flash extracts clues directly from the raw photo, no preprocessing needed
@@ -92,11 +97,6 @@ make run
 ## Solve pipeline
 
 The solver uses a tiered strategy that minimizes API cost while maintaining accuracy:
-
-```
-Photo → Grid Detection (OpenCV) → Clue Extraction (Gemini OCR) → Verification
-  → Candidate Generation → Iterative Solver (Claude) → CSP Cleanup → Playable Puzzle
-```
 
 1. **Database lookup** — instant SQLite query resolves ~78% of clues from 10.1M historical pairs
 2. **Web pre-pass** — Haiku web search identifies pop culture, celebrity, and current-event clues
