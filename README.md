@@ -7,10 +7,13 @@
 ![CI](https://github.com/jnmathew/crosswise/actions/workflows/ci.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Crosswise is a high-precision crossword digitizer and autonomous solver. It transforms raw newspaper photographs into accurate, solved, and playable digital puzzles using a multi-stage AI orchestration pipeline.
+Crosswise is a high-precision crossword digitizer and autonomous solver. Printed newspaper crosswords are difficult to digitize reliably due to grid distortion, OCR errors, and ambiguous clues. Crosswise solves this by combining computer vision, structured verification, and multi-stage AI reasoning into a robust pipeline — **98.5% accuracy across 39 real printed newspaper puzzles**, at ~$1.50 per solve.
 
-![Crosswise demo](assets/demo/sample_puzzle_demo.gif)
-*Upload a photo → grid detected → clues extracted via OCR → AI solves in real-time → play with hints*
+<p align="center">
+  <img src="assets/demo/sample_puzzle_demo.gif" alt="Crosswise demo">
+  <br>
+  <em>Upload a photo → grid detected → clues extracted via OCR → AI solves in real-time → play with hints</em>
+</p>
 
 ## How it works
 
@@ -26,17 +29,29 @@ Crosswise is a high-precision crossword digitizer and autonomous solver. It tran
 Tested on **39 real newspaper photographs** (14x13, 15x15, and 21x21 grids):
 
 - **2,846 / 2,888 clues solved** (98.5%) — 32 perfect solves, 7 near-perfect (86–99%), zero failures
-- **~$1.50 per puzzle** in API costs (Gemini OCR + Claude solving + hint generation)
+- **~$1.50 per puzzle** in API costs (see breakdown below)
 - **78% of clues** resolved instantly via database lookup — the LLM only handles the remaining 22%
 - **Self-correcting**: conflict backtracking detected and fixed wrong answers in 38% of puzzles
 - **10.1M** historical clue/answer pairs + **605K** unique words for pattern matching (see [DATASETS.md](docs/DATASETS.md))
-- **97 tests** (91 unit, 6 integration) with GitHub Actions CI on every push
+- **97 tests** (91 unit, 6 integration) with pytest, run via GitHub Actions CI on every push
+
+### Cost breakdown (average per puzzle)
+
+| Phase | Model | Avg Cost |
+|-------|-------|----------|
+| Web pre-pass | Claude Haiku + web search | $0.48 |
+| Candidate generation | Claude Opus/Sonnet | $0.37 |
+| Iterative solving | Claude Opus | $0.58 |
+| Hint generation | Claude Haiku | $0.07 |
+| **Total** | | **$1.50** |
 
 ## Demo
 
-A pre-solved sample puzzle is included so you can try the interactive player without API keys or the clue database:
+A pre-solved sample puzzle is included so you can try the interactive player without API keys or the clue database. *The sample puzzle is a homemade digital grid — real newspaper puzzles are not included due to copyright.*
 
 ```bash
+git clone https://github.com/jnmathew/crosswise.git
+cd crosswise
 make install
 make run-demo
 # Open http://localhost:5173
@@ -54,6 +69,8 @@ make run-demo
 ### Setup
 
 ```bash
+git clone https://github.com/jnmathew/crosswise.git
+cd crosswise
 make install
 
 # Set ANTHROPIC_API_KEY and GEMINI_API_KEY
@@ -75,6 +92,11 @@ make run
 ## Solve pipeline
 
 The solver uses a tiered strategy that minimizes API cost while maintaining accuracy:
+
+```
+Photo → Grid Detection (OpenCV) → Clue Extraction (Gemini OCR) → Verification
+  → Candidate Generation → Iterative Solver (Claude) → CSP Cleanup → Playable Puzzle
+```
 
 1. **Database lookup** — instant SQLite query resolves ~78% of clues from 10.1M historical pairs
 2. **Web pre-pass** — Haiku web search identifies pop culture, celebrity, and current-event clues
@@ -98,11 +120,12 @@ crosswise/
 web/                React + TypeScript + Vite interactive player
 ```
 
-**Where to start reading**: `crosswise/api/server.py` (14 endpoints) delegates to `crosswise/api/pipeline.py` (orchestration), which calls into `crosswise/vision/` (image processing) and `crosswise/solver/` (solving).
+**Where to start reading**: `crosswise/api/server.py` (15 endpoints) delegates to `crosswise/api/pipeline.py` (orchestration), which calls into `crosswise/vision/` (image processing) and `crosswise/solver/` (solving).
 
 ## Tech stack
 
 **Backend**: Python 3.11, FastAPI, OpenCV, Gemini 3 Flash, Claude Opus/Sonnet/Haiku, SQLite
+
 **Frontend**: React 18, TypeScript, Vite, react-crossword, Server-Sent Events
 
 ## Environment variables
