@@ -52,7 +52,7 @@ class GeminiOCRProvider:
             ]}],
             "generationConfig": {"temperature": 0},
         }
-        resp = requests.post(url, json=payload, timeout=60)
+        resp = requests.post(url, json=payload, timeout=120)
         resp.raise_for_status()
 
         raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -70,9 +70,11 @@ class GeminiOCRProvider:
 
         lines = ["## ACROSS\n"]
         for clue in clues.get("ACROSS", []):
-            lines.append(f"{clue['num']}. {clue['clue']}")
+            text = clue.get("clue") or clue.get("text", "")
+            lines.append(f"{clue['num']}. {text}")
         lines.append("\n## DOWN\n")
         for clue in clues.get("DOWN", []):
-            lines.append(f"{clue['num']}. {clue['clue']}")
+            text = clue.get("clue") or clue.get("text", "")
+            lines.append(f"{clue['num']}. {text}")
 
         return "\n".join(lines)
