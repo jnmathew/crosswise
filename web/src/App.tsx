@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import PuzzleSelector from './components/PuzzleSelector';
 import CrosswordPlayer from './components/CrosswordPlayer';
 import UploadPage from './components/UploadPage';
+import MaskRetryPage from './components/MaskRetryPage';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
 
 function ThemeToggle() {
@@ -44,6 +45,7 @@ export default function App() {
           <Route path="/" element={<PuzzleSelector />} />
           <Route path="/upload" element={<UploadPage />} />
           <Route path="/puzzle/:id" element={<CrosswordPlayer />} />
+          <Route path="/mask/:sessionId" element={<MaskRetryPage />} />
         </Routes>
       </BrowserRouter>
     </ThemeProvider>

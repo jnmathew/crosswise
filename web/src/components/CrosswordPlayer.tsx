@@ -607,7 +607,10 @@ export default function CrosswordPlayer() {
       {pipelineError && (
         <div style={styles.errorBanner} className="error-banner">
           <span>{pipelineError}</span>
-          <Link to="/upload" style={styles.errorBannerLink}>Try another image</Link>
+          <div style={styles.errorBannerActions}>
+            <Link to={`/mask/${puzzleId}`} style={styles.errorBannerLink}>Retry with masking</Link>
+            <Link to="/upload" style={styles.errorBannerLink}>Try another image</Link>
+          </div>
         </div>
       )}
 
@@ -1255,6 +1258,11 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  errorBannerActions: {
+    display: 'flex',
+    gap: '16px',
+    flexShrink: 0,
   },
   errorBannerLink: {
     color: '#2563eb',

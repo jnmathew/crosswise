@@ -47,7 +47,7 @@ export default function ImageMasker({ imageUrl, onSubmit, submitting, exampleMas
     const s = scaleRef.current;
 
     // Draw mask rectangles
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
     ctx.strokeStyle = '#aaa';
     ctx.lineWidth = 1;
     for (const r of rectangles) {
@@ -72,7 +72,7 @@ export default function ImageMasker({ imageUrl, onSubmit, submitting, exampleMas
     // Draw current in-progress shape
     if (drawing && startPoint && currentPoint) {
       if (mode === 'mask') {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
         ctx.strokeStyle = '#888';
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 4]);
