@@ -100,7 +100,7 @@ For extracting crossword clues from newspaper images:
 - Pattern matching uses GLOB (e.g., `C_T` matches `CAT`, `COT`, `CUT`)
 
 **word_index.py** - Unified crossword word index:
-- Loads multiple word lists (Broda, Crossword Nexus, Spread the Wordlist)
+- Loads multiple word lists (Broda, Crossword Nexus)
 - Fast `contains()` membership testing and `match_pattern()` for pattern matching
 - Quality scores for value ordering in the solver
 
