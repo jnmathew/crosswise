@@ -244,7 +244,6 @@ export default function UploadPage() {
           imageUrl={uploadData.original_image_url}
           onSubmit={handleMaskSubmit}
           submitting={submittingMask}
-          exampleMaskedUrl="/masking-example.jpg"
         />
       )}
 
