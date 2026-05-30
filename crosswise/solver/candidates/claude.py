@@ -29,7 +29,7 @@ def generate_with_claude(
     clues: List[ClueInput],
     candidates_per_clue: int = DEFAULT_CANDIDATES_PER_CLUE,
     batch_size: int = 15,
-    model: str = "claude-opus-4-20250514",
+    model: str = "claude-opus-4-8",
 ) -> Dict[str, List[str]]:
     """
     Generate candidates using Anthropic Claude API.
@@ -138,17 +138,12 @@ def ensure_minimum_candidates(
     candidates: Dict[str, List[str]],
     db: "ClueDatabase",
     min_candidates: int = DEFAULT_MIN_CANDIDATES,
-    model: str = "gpt-4o",
-    use_o1_for_wordplay: bool = True,
-    use_structured_outputs: bool = True,
 ) -> Dict[str, List[str]]:
     """
     Ensure each clue has at least min_candidates options.
 
-    This prevents single-candidate clues from blocking the solver.
-    When a clue has fewer than min_candidates:
-    1. Use o1 for wordplay clues (better at reasoning through puns)
-    2. Use structured outputs for regular clues (guarantees valid JSON)
+    This prevents single-candidate clues from blocking the solver by padding
+    any clue with fewer than min_candidates via Claude Sonnet.
 
     NOTE: We intentionally DON'T use db.lookup_by_length() because
     random words of the correct length add noise without meaning.
@@ -158,9 +153,6 @@ def ensure_minimum_candidates(
         candidates: Current candidates dict
         db: ClueDatabase instance
         min_candidates: Minimum candidates per clue
-        model: OpenAI model for non-wordplay clues
-        use_o1_for_wordplay: Use o1 model for pun clues
-        use_structured_outputs: Use structured outputs for regular clues
 
     Returns:
         Updated candidates dict with minimum candidates per clue
@@ -180,7 +172,7 @@ def ensure_minimum_candidates(
         claude_candidates = generate_with_claude(
             needs_more,
             candidates_per_clue=min_candidates * 3,  # Over-request; length filter drops ~50%
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
         )
         for clue_id, cands in claude_candidates.items():
             existing = set(candidates.get(clue_id, []))
@@ -264,7 +256,7 @@ Respond with ONLY a JSON object: {{"clue_id": ["BEST", "SECOND", ...], ...}}"""
         try:
             logger.info(f"Extended thinking batch {batch_num}/{total_batches} ({len(batch)} clues)...")
             response = client.messages.create(
-                model="claude-sonnet-4-5-20250929",
+                model="claude-sonnet-4-6",
                 max_tokens=16000,
                 thinking={
                     "type": "enabled",

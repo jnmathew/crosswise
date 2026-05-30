@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # OCR Provider
     OCR_PROVIDER: str = "gemini"
     GEMINI_API_KEY: str = ""
-    GEMINI_OCR_MODEL: str = "gemini-3-flash-preview"
+    GEMINI_OCR_MODEL: str = "gemini-3.5-flash"
 
     # Logging
     LOG_LEVEL: str = "INFO"

@@ -30,7 +30,7 @@ class GeminiOCRProvider:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gemini-3-flash-preview",
+        model: str = "gemini-3.5-flash",
     ):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
         self.model = model

@@ -19,8 +19,8 @@ from loguru import logger
 
 # Pricing per million tokens: (input_cost, output_cost)
 MODEL_PRICING: Dict[str, tuple] = {
-    "claude-opus-4-20250514": (15.0, 75.0),
-    "claude-sonnet-4-20250514": (3.0, 15.0),
+    "claude-opus-4-8": (15.0, 75.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
 }
 

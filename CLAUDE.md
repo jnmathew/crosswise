@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automatically extract the grid and clues via OCR, solve with AI, and play interactively with hints. The pipeline uses OpenCV for grid detection, Gemini 3 Flash for clue extraction, Claude Opus for solving, and a React frontend for the interactive player.
+Crosswise is a full-stack crossword puzzle app: upload a newspaper photo, automatically extract the grid and clues via OCR, solve with AI, and play interactively with hints. The pipeline uses OpenCV for grid detection, Gemini 3.5 Flash for clue extraction, Claude Opus for solving, and a React frontend for the interactive player.
 
 ## Environment
 
@@ -26,7 +26,7 @@ Key dependencies:
 - pydantic, pydantic-settings (data models, config, .env loading)
 - fastapi, uvicorn (API server)
 - anthropic (Claude candidate generation, solving, hints)
-- google-genai (Gemini 3 Flash OCR)
+- google-genai (Gemini 3.5 Flash OCR)
 - loguru (logging)
 - python-multipart (file upload handling)
 
@@ -57,7 +57,7 @@ Pluggable OCR provider system with `OCRProvider` protocol for future extensibili
 
 **base.py** — `OCRProvider` protocol and `create_ocr_provider()` factory.
 
-**gemini.py** — Gemini 3 Flash provider:
+**gemini.py** — Gemini 3.5 Flash provider:
 - One-shots clue extraction from raw newspaper photos, no preprocessing needed
 - Handles multi-column Sunday-size layouts (142 clues) without masking or separators
 - Uses `google-genai` SDK with structured extraction prompt
@@ -68,7 +68,7 @@ Pluggable OCR provider system with `OCRProvider` protocol for future extensibili
 For extracting crossword clues from newspaper images:
 
 1. **Grid Detection**: Use `grid_detection.py` to locate and extract the crossword grid
-2. **OCR Extraction**: Gemini 3 Flash extracts clues directly from raw photos — no preprocessing needed
+2. **OCR Extraction**: Gemini 3.5 Flash extracts clues directly from raw photos — no preprocessing needed
 3. **Puzzle Verification**: Use `verify_puzzle()` to match OCR clues against grid slots
    - Every OCR clue must match a grid slot
    - Every grid slot must have an OCR clue
@@ -78,7 +78,6 @@ For extracting crossword clues from newspaper images:
 
 ## Development Notes
 
-- **Git history was scrubbed** with `git filter-repo` to remove ~53MB of binary images (v1 debug PNGs, cell crops, example JPGs). `.git/` went from 49MB → 608K. A pre-filter backup exists locally outside the repo.
 - Image processing uses grayscale conversion with careful handling of both color and grayscale inputs
 - Fallback strategies implemented (adaptive → Otsu thresholding) when component detection fails
 - Grid clue numbers are computed algorithmically (not OCR'd) — more reliable
@@ -149,7 +148,6 @@ For extracting crossword clues from newspaper images:
 9. Fully-constrained pattern handling: dictionary API + Haiku verification for words not in candidate list
 10. CSP cleanup for any remaining unsolved clues
 11. Hint generation runs in parallel after solve
-- **Cost**: ~$1.20/puzzle (down from $5.85), 69/69 solve rate
 
 ### FastAPI Backend (`crosswise/api/`)
 
@@ -224,5 +222,5 @@ Puzzle JSON stored at `web/public/puzzles/{id}.json`:
 
 ### Environment Variables
 
-- `GEMINI_API_KEY` — Required for Gemini 3 Flash OCR
+- `GEMINI_API_KEY` — Required for Gemini 3.5 Flash OCR
 - `ANTHROPIC_API_KEY` — Required for Claude candidate generation, solving, and hints

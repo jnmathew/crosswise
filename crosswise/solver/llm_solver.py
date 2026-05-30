@@ -220,7 +220,7 @@ def solve_pass(
     candidates: Dict[str, List[str]],
     assignment: Dict[ClueId, Word],
     pass_num: int,
-    model: str = "claude-opus-4-20250514",
+    model: str = "claude-opus-4-8",
 ) -> Dict[ClueId, Word]:
     """Run one LLM solve pass. Returns new assignments from this pass."""
 
@@ -490,7 +490,7 @@ def resolve_conflict_cluster(
     candidates: Dict[str, List[str]],
     assignment: Dict[ClueId, Word],
     cluster: Dict,
-    model: str = "claude-opus-4-20250514",
+    model: str = "claude-opus-4-8",
 ) -> Dict[ClueId, Word]:
     """Ask the LLM to re-solve a conflict cluster.
 

@@ -24,7 +24,7 @@ Photo → Grid Detection (OpenCV) → Clue Extraction (Gemini OCR) → Verificat
 
 1. **Upload** a photo of a printed crossword
 2. **Grid detection** — OpenCV finds the grid, corrects perspective, and computes clue numbers algorithmically from the grid geometry (no need to OCR tiny numbers inside grid)
-3. **OCR** — Gemini 3 Flash extracts clues directly from the raw photo, no preprocessing needed
+3. **OCR** — Gemini 3.5 Flash extracts clues directly from the raw photo, no preprocessing needed
 4. **Verification** — every OCR clue must match a grid slot and vice versa (100% correspondence required before solving)
 5. **Solve** — Multi-stage AI solver: database lookup (10.1M clue pairs), web search for pop culture, Claude Opus iterative solving with constraint propagation, and automatic conflict backtracking when crossing patterns reveal wrong answers.
 6. **Play** — interactive player with Check/Reveal functionality, timer, and hints + explanations to facilitate learning.
@@ -42,13 +42,30 @@ Tested on **39 real newspaper photographs** (14x13, 15x15, and 21x21 grids):
 
 ### Cost breakdown (average per puzzle)
 
-| Phase | Model | Avg Cost |
-|-------|-------|----------|
-| Web pre-pass | Claude Haiku + web search | $0.48 |
-| Candidate generation | Claude Opus/Sonnet | $0.37 |
-| Iterative solving | Claude Opus | $0.58 |
-| Hint generation | Claude Haiku | $0.07 |
+> Measured on the **2026-03-05 test run** (39 puzzles). Costs are tied to the exact model versions below — see [Models under test](#models-under-test). Newer models have **not** been re-measured.
+
+| Phase | Model (version at run time) | Avg Cost |
+|-------|-----------------------------|----------|
+| Web pre-pass | Haiku 4.5 (`claude-haiku-4-5-20251001`) + web search | $0.48 |
+| Candidate generation | Opus 4.0 (`claude-opus-4-20250514`) + Sonnet 4.0 (`claude-sonnet-4-20250514`) | $0.37 |
+| Iterative solving | Opus 4.0 (`claude-opus-4-20250514`) | $0.58 |
+| Hint generation | Sonnet 4.0 (`claude-sonnet-4-20250514`) | $0.07 |
 | **Total** | | **$1.50** |
+
+#### Models under test
+
+These results come from the 2026-03-05 test run (`internal_dev/gauntlet/results.csv`). Re-running on different models will shift the numbers, so the exact versions that produced them are recorded here:
+
+| Stage | Model ID |
+|-------|----------|
+| OCR | `gemini-3-flash-preview` |
+| Web pre-pass | `claude-haiku-4-5-20251001` |
+| Candidate generation (zero-hit) | `claude-opus-4-20250514` |
+| Candidate generation (padding) | `claude-sonnet-4-20250514` |
+| Iterative solving | `claude-opus-4-20250514` |
+| Hint generation | `claude-sonnet-4-20250514` |
+
+> **The current code defaults differ.** As of 2026-05-30 the pipeline points at Opus 4.8 (`claude-opus-4-8`), Sonnet 4.6 (`claude-sonnet-4-6`), and Gemini 3.5 Flash (`gemini-3.5-flash`). The figures above reflect the 2026-03-05 model set only and have not been re-validated against the newer models.
 
 ## Demo
 
@@ -113,7 +130,7 @@ The solver uses a tiered strategy that minimizes API cost while maintaining accu
 ```
 crosswise/
   vision/           OpenCV grid detection, image preprocessing, clue extraction
-  ocr/              Pluggable OCR provider (Gemini 3 Flash)
+  ocr/              Pluggable OCR provider (Gemini 3.5 Flash)
   solver/           LLM iterative solver, CSP, cost tracking, hint generation
   solver/candidates/ Database lookup, Claude generation, web pre-pass, scoring
   api/              FastAPI backend, SSE progress streaming, session management
@@ -124,7 +141,7 @@ web/                React + TypeScript + Vite interactive player
 
 ## Tech stack
 
-**Backend**: Python 3.11, FastAPI, OpenCV, Gemini 3 Flash, Claude Opus/Sonnet/Haiku, SQLite
+**Backend**: Python 3.11, FastAPI, OpenCV, Gemini 3.5 Flash, Claude Opus/Sonnet/Haiku, SQLite
 
 **Frontend**: React 18, TypeScript, Vite, react-crossword, Server-Sent Events
 
@@ -132,7 +149,7 @@ web/                React + TypeScript + Vite interactive player
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `GEMINI_API_KEY` | Yes | Gemini 3 Flash OCR |
+| `GEMINI_API_KEY` | Yes | Gemini 3.5 Flash OCR |
 | `ANTHROPIC_API_KEY` | Yes | Claude candidate generation, solving, and hints |
 
 ## Data sources

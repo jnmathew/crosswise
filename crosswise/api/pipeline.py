@@ -506,7 +506,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
 
     def _run_sonnet_pad():
         if clues_needing_pad:
-            return generate_with_claude(clues_needing_pad, candidates_per_clue=15, model="claude-sonnet-4-20250514")
+            return generate_with_claude(clues_needing_pad, candidates_per_clue=15, model="claude-sonnet-4-6")
         return {}
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -555,7 +555,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
     still_under = [c for c in clue_inputs if len(candidates.get(c.clue_id, [])) < 5]
     if still_under:
         logger.info(f"  {_elapsed()} Second-pass padding for {len(still_under)} clues still under 5")
-        extra = generate_with_claude(still_under, candidates_per_clue=15, model="claude-sonnet-4-20250514")
+        extra = generate_with_claude(still_under, candidates_per_clue=15, model="claude-sonnet-4-6")
         for cid, words in extra.items():
             existing = set(candidates.get(cid, []))
             for w in words:
