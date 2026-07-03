@@ -19,7 +19,7 @@ from loguru import logger
 
 # Pricing per million tokens: (input_cost, output_cost)
 MODEL_PRICING: Dict[str, tuple] = {
-    "claude-opus-4-8": (15.0, 75.0),
+    "claude-opus-4-8": (5.0, 25.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
 }
@@ -82,7 +82,7 @@ class CostTracker:
                     pricing = val
                     break
         if pricing is None:
-            pricing = (15.0, 75.0)  # default to Opus pricing (conservative)
+            pricing = (5.0, 25.0)  # default to Opus 4.8 pricing (conservative)
 
         input_cost_per_m, output_cost_per_m = pricing
         cost = (
