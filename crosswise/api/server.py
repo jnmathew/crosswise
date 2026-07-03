@@ -37,6 +37,26 @@ session_mgr = SessionManager(SESSIONS_DIR)
 progress_queues: dict[str, asyncio.Queue] = {}
 cancel_events: dict[str, threading.Event] = {}
 
+
+def _run_tracked(task_fn, session_id: str, queue: asyncio.Queue,
+                 cancel_event: threading.Event, /, *args, **kwargs):
+    """Run a background pipeline task, then drop its progress-tracking entries.
+
+    Cleanup must happen on the producer side: if no SSE consumer ever drains
+    the terminal message (browser closed mid-solve), the queue/cancel-event
+    entries would otherwise leak forever. A consumer that is already streaming
+    holds its own reference to the queue, so it can still drain the terminal
+    message after this cleanup runs. The identity checks avoid removing the
+    entries of a newer solve that re-registered under the same session_id.
+    """
+    try:
+        task_fn(*args, **kwargs)
+    finally:
+        if progress_queues.get(session_id) is queue:
+            progress_queues.pop(session_id, None)
+        if cancel_events.get(session_id) is cancel_event:
+            cancel_events.pop(session_id, None)
+
 app = FastAPI(title="Crosswise API", version="0.1.0")
 
 app.add_middleware(
@@ -188,11 +208,13 @@ async def submit_mask(session_id: str, mask: MaskRequest, background_tasks: Back
     # Fire background solve
     queue: asyncio.Queue = asyncio.Queue()
     cancel_event = threading.Event()
+    loop = asyncio.get_running_loop()
     progress_queues[session_id] = queue
     cancel_events[session_id] = cancel_event
     background_tasks.add_task(
-        pipeline.run_solve_background, session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id,
-        cancel_event,
+        _run_tracked, pipeline.run_solve_background, session_id, queue, cancel_event,
+        session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id,
+        cancel_event, loop,
     )
 
     return MaskResponse(
@@ -222,12 +244,13 @@ async def start_pipeline(session_id: str, mask: MaskRequest, background_tasks: B
     # Create progress queue and start background pipeline
     queue: asyncio.Queue = asyncio.Queue()
     cancel_event = threading.Event()
+    loop = asyncio.get_running_loop()
     progress_queues[session_id] = queue
     cancel_events[session_id] = cancel_event
     background_tasks.add_task(
-        pipeline.run_full_pipeline_background,
+        _run_tracked, pipeline.run_full_pipeline_background, session_id, queue, cancel_event,
         session_dir, PUZZLES_DIR, puzzle_id, mask, settings,
-        queue, session_mgr, session_id, cancel_event,
+        queue, session_mgr, session_id, cancel_event, loop,
     )
 
     session_mgr.update_status(session_id, SessionStatus.OCR_RUNNING, puzzle_id=puzzle_id)
@@ -250,11 +273,13 @@ async def retrigger_solve(session_id: str, background_tasks: BackgroundTasks):
 
     queue: asyncio.Queue = asyncio.Queue()
     cancel_event = threading.Event()
+    loop = asyncio.get_running_loop()
     progress_queues[session_id] = queue
     cancel_events[session_id] = cancel_event
     background_tasks.add_task(
-        pipeline.run_solve_background, session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id,
-        cancel_event,
+        _run_tracked, pipeline.run_solve_background, session_id, queue, cancel_event,
+        session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id,
+        cancel_event, loop,
     )
 
     return {"status": "solve_started", "session_id": session_id, "puzzle_id": puzzle_id}
@@ -291,8 +316,11 @@ async def stream_progress(session_id: str):
                 progress = await asyncio.wait_for(queue.get(), timeout=120)
                 yield f"data: {progress.model_dump_json()}\n\n"
                 if progress.stage in ("complete", "failed", "verification_failed", "cancelled"):
-                    progress_queues.pop(session_id, None)
-                    cancel_events.pop(session_id, None)
+                    # Guard by identity: a retriggered solve may have
+                    # re-registered fresh entries under this session_id.
+                    if progress_queues.get(session_id) is queue:
+                        progress_queues.pop(session_id, None)
+                        cancel_events.pop(session_id, None)
                     break
             except asyncio.TimeoutError:
                 yield 'data: {"stage":"heartbeat","message":"Still working...","progress":-1}\n\n'

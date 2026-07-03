@@ -341,14 +341,18 @@ def run_full_pipeline_background(
     session_mgr: Any,
     session_id: str,
     cancel_event: Optional[threading.Event] = None,
+    loop: Optional[asyncio.AbstractEventLoop] = None,
 ):
-    """Background task: OCR + verify + solve + hints, with SSE progress throughout."""
-    import asyncio as _asyncio
+    """Background task: OCR + verify + solve + hints, with SSE progress throughout.
 
-    loop = _asyncio.new_event_loop()
+    Runs in a worker thread. `loop` must be the event loop that owns `queue`
+    (the server's main loop): asyncio.Queue is not thread-safe, so all puts are
+    marshalled onto that loop via call_soon_threadsafe. The queue is unbounded,
+    so put_nowait cannot raise QueueFull.
+    """
 
     def put(progress: SolveProgress):
-        loop.run_until_complete(queue.put(progress))
+        loop.call_soon_threadsafe(queue.put_nowait, progress)
 
     try:
         # Phase 1: OCR
@@ -389,8 +393,6 @@ def run_full_pipeline_background(
     except Exception as e:
         put(SolveProgress(stage="failed", message=str(e), progress=0))
         session_mgr.update_status(session_id, SessionStatus.FAILED, error=str(e))
-    finally:
-        loop.close()
 
 
 def run_solve_background(
@@ -401,14 +403,16 @@ def run_solve_background(
     session_mgr: Any,
     session_id: str,
     cancel_event: Optional[threading.Event] = None,
+    loop: Optional[asyncio.AbstractEventLoop] = None,
 ):
-    """Background task: solve puzzle + generate hints, updating puzzle JSON in-place."""
-    import asyncio as _asyncio
+    """Background task: solve puzzle + generate hints, updating puzzle JSON in-place.
 
-    loop = _asyncio.new_event_loop()
+    Runs in a worker thread. `loop` must be the event loop that owns `queue`
+    (the server's main loop) — see run_full_pipeline_background.
+    """
 
     def put(progress: SolveProgress):
-        loop.run_until_complete(queue.put(progress))
+        loop.call_soon_threadsafe(queue.put_nowait, progress)
 
     try:
         _run_solve(session_dir, puzzles_dir, puzzle_id, put, session_mgr, session_id, cancel_event)
@@ -418,8 +422,6 @@ def run_solve_background(
     except Exception as e:
         put(SolveProgress(stage="failed", message=str(e), progress=0))
         session_mgr.update_status(session_id, SessionStatus.FAILED, error=str(e))
-    finally:
-        loop.close()
 
 
 def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None, solve_trace=None, trace_global=None):
