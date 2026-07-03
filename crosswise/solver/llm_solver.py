@@ -592,8 +592,11 @@ Return ONLY the JSON object."""
 
     client = anthropic.Anthropic(timeout=120.0)
 
+    # web_search_20260209 adds dynamic filtering (Claude filters results before
+    # they hit context — better accuracy, fewer tokens). Requires Opus 4.6+/
+    # Sonnet 4.6, which the solver model (Opus 4.8) satisfies.
     tools = [{
-        "type": "web_search_20250305",
+        "type": "web_search_20260209",
         "name": "web_search",
         "max_uses": 3,
     }]
