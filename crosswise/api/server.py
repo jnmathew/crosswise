@@ -382,12 +382,20 @@ async def list_puzzles():
     return puzzles
 
 
+def _puzzle_path(puzzle_id: str) -> Path:
+    """Resolve a puzzle_id to its JSON path, rejecting IDs that escape PUZZLES_DIR."""
+    path = (PUZZLES_DIR / f"{puzzle_id}.json").resolve()
+    if not path.is_relative_to(PUZZLES_DIR.resolve()):
+        raise HTTPException(400, "Invalid puzzle ID")
+    if not path.exists():
+        raise HTTPException(404, "Puzzle not found")
+    return path
+
+
 @app.patch("/api/puzzles/{puzzle_id}")
 async def update_puzzle(puzzle_id: str, body: dict):
     """Update puzzle metadata (e.g. name)."""
-    puzzle_path = PUZZLES_DIR / f"{puzzle_id}.json"
-    if not puzzle_path.exists():
-        raise HTTPException(404, "Puzzle not found")
+    puzzle_path = _puzzle_path(puzzle_id)
     with open(puzzle_path) as f:
         data = json.load(f)
     if "name" in body:
@@ -400,9 +408,7 @@ async def update_puzzle(puzzle_id: str, body: dict):
 @app.delete("/api/puzzles/{puzzle_id}")
 async def delete_puzzle(puzzle_id: str):
     """Delete a puzzle JSON file."""
-    puzzle_path = PUZZLES_DIR / f"{puzzle_id}.json"
-    if not puzzle_path.exists():
-        raise HTTPException(404, "Puzzle not found")
+    puzzle_path = _puzzle_path(puzzle_id)
     puzzle_path.unlink()
     return {"ok": True}
 

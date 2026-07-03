@@ -23,7 +23,11 @@ class SessionManager:
         return session_id
 
     def get_session_dir(self, session_id: str) -> Path:
-        d = self.base_dir / session_id
+        d = (self.base_dir / session_id).resolve()
+        # Session IDs are server-generated hex, so a well-behaved client can
+        # never trip this — it guards against crafted IDs escaping base_dir.
+        if not d.is_relative_to(self.base_dir.resolve()) or d == self.base_dir.resolve():
+            raise FileNotFoundError(f"Session {session_id} not found")
         if not d.exists():
             raise FileNotFoundError(f"Session {session_id} not found")
         return d
