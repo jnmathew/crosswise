@@ -221,6 +221,7 @@ def solve_pass(
     assignment: Dict[ClueId, Word],
     pass_num: int,
     model: str = "claude-opus-4-8",
+    effort: str = "high",
 ) -> Dict[ClueId, Word]:
     """Run one LLM solve pass. Returns new assignments from this pass."""
 
@@ -305,7 +306,8 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
         response = client.messages.create(
             model=model,
             max_tokens=4096,
-            system=SKILL_PROMPT,
+            system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            output_config={"effort": effort},
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
@@ -491,6 +493,7 @@ def resolve_conflict_cluster(
     assignment: Dict[ClueId, Word],
     cluster: Dict,
     model: str = "claude-opus-4-8",
+    effort: str = "high",
 ) -> Dict[ClueId, Word]:
     """Ask the LLM to re-solve a conflict cluster.
 
@@ -604,7 +607,8 @@ Return ONLY the JSON object."""
             response = client.messages.create(
                 model=model,
                 max_tokens=4096,
-                system=SKILL_PROMPT,
+                system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                output_config={"effort": effort},
                 messages=messages,
                 tools=tools,
             )
@@ -960,9 +964,13 @@ def solve_with_llm(
         if progress_callback:
             progress_callback(pass_num, len(assignment), total)
 
+        # Early passes are pattern-driven (proper nouns, forced answers) and
+        # don't need deep reasoning — run them at lower effort to cut token
+        # spend, reserving high effort for the harder late passes.
         new_answers = solve_pass(
             solver_input, clue_text_lookup, candidates,
             assignment, pass_num,
+            effort="medium" if pass_num <= 3 else "high",
         )
 
         if new_answers is None:
@@ -1087,6 +1095,7 @@ def solve_with_llm(
                 new_answers = solve_pass(
                     solver_input, clue_text_lookup, candidates,
                     assignment, pass_num=max_passes + 1,
+                    effort="high",
                 )
                 if new_answers:
                     trial = {**assignment, **new_answers}
