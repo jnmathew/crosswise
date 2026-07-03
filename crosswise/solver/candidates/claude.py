@@ -3,7 +3,7 @@
 Primary LLM generation used by the web pipeline:
 - generate_with_claude: batch candidate generation via Opus or Sonnet
 - ensure_minimum_candidates: pad clues with < 5 candidates via Sonnet
-- generate_with_extended_thinking: Sonnet 4.5 with thinking for hard clues
+- generate_with_extended_thinking: Sonnet 4.6 with adaptive thinking for hard clues
 """
 
 import os
@@ -192,14 +192,14 @@ def ensure_minimum_candidates(
 def generate_with_extended_thinking(
     clues: List[ClueInput],
     batch_size: int = 8,
-    budget_tokens: int = 10000,
     word_index: Optional[Any] = None,
 ) -> Dict[str, List[ScoredCandidate]]:
     """
-    Generate candidates using Claude extended thinking for hard clues.
+    Generate candidates using Claude adaptive thinking for hard clues.
 
-    Uses Sonnet 4.5 with thinking enabled -- the model reasons through
-    wordplay, puns, and cryptic clue mechanics before answering.
+    Uses Sonnet 4.6 with adaptive thinking -- the model reasons through
+    wordplay, puns, and cryptic clue mechanics before answering, deciding
+    how much to think per clue.
 
     No crossing patterns are used (avoids poisoned crossing problem).
     Just clue text + answer length.
@@ -207,7 +207,6 @@ def generate_with_extended_thinking(
     Args:
         clues: Unsolved clues to generate candidates for
         batch_size: Clues per API call (default: 8)
-        budget_tokens: Thinking token budget per call (default: 10000)
         word_index: Optional word index for verification
 
     Returns:
@@ -258,10 +257,8 @@ Respond with ONLY a JSON object: {{"clue_id": ["BEST", "SECOND", ...], ...}}"""
             response = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=16000,
-                thinking={
-                    "type": "enabled",
-                    "budget_tokens": budget_tokens,
-                },
+                thinking={"type": "adaptive"},
+                output_config={"effort": "high"},
                 messages=[{"role": "user", "content": prompt}],
             )
 
