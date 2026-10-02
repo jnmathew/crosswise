@@ -755,20 +755,33 @@ def find_suspect_answers(
 
     Crossing agreement is the only check every answer goes through, so a
     wrong but self-consistent cluster survives a "complete" solve (gauntlet
-    101: CRABDIP forced REI and the non-word BULISH). Two checks:
-    1. Non-words: not in the word index and never proposed as a candidate
-       for that clue (free).
-    2. One review call over the whole filled grid.
+    101: CRABDIP forced REI and the non-word BULISH). One review call reads
+    the whole fill and decides what is wrong.
+
+    Answers missing from the word index (and never proposed as candidates)
+    are passed to the reviewer as ones to check closely, not flagged
+    outright: theme entries (SCIENCEAFFAIR) and uncommon fill (ZHA) are
+    missing too, and re-solving them clears every crossing answer.
     """
     from crosswise.solver.cost_tracker import get_tracker
     from crosswise.solver.word_index import get_word_index
 
     word_index = get_word_index()
+    unknown = sorted(
+        cid for cid, word in assignment.items()
+        if not word_index.contains(word)
+        and word not in {c.upper() for c in candidates.get(cid, [])}
+    )
+    unknown_note = ""
+    if unknown:
+        unknown_note = (
+            "\n\nThese answers aren't in our word list, so check them closely: "
+            + ", ".join(f"{cid}={assignment[cid]}" for cid in unknown)
+            + ". Many legitimate answers aren't in it either (theme entries, "
+            "multi-word phrases, names, foreign terms); flag one only if it is "
+            "actually wrong."
+        )
     suspects: Dict[ClueId, str] = {}
-    for cid, word in assignment.items():
-        proposed = {c.upper() for c in candidates.get(cid, [])}
-        if not word_index.contains(word) and word not in proposed:
-            suspects[cid] = "not a known word, and never proposed as a candidate"
 
     answer_lines = [
         f'{cid}: "{clue_text_lookup.get(cid, "")}" = {word}'
@@ -782,7 +795,7 @@ def find_suspect_answers(
 ## Answers
 {chr(10).join(answer_lines)}
 
-List the answers that are wrong: not a real word or phrase, or not a fit for their clue. Crossword answers are often abbreviations, partial phrases, foreign words, puns, or wordplay, so flag only answers you believe are actually wrong, and say why. Return an empty list if every answer fits."""
+List the answers that are wrong: not a real word or phrase, or not a fit for their clue. Crossword answers are often abbreviations, partial phrases, foreign words, puns, or wordplay, so flag only answers you believe are actually wrong, and say why. Return an empty list if every answer fits.{unknown_note}"""
 
     client = anthropic.Anthropic(timeout=300.0)
     try:
