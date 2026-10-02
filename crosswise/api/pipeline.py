@@ -19,7 +19,12 @@ from crosswise.config import Settings
 from crosswise.api.models import MaskRequest, SolveProgress, SessionStatus
 from crosswise.api.storage import write_json_atomic
 from crosswise.solver.cost_tracker import submit_in_context
+from crosswise.solver.live_feed import LiveFeed
 
+
+# Live feeds of solves in progress, by session ID: a viewer that connects
+# mid-solve gets the current answers from here before the live events.
+LIVE_FEEDS: Dict[str, LiveFeed] = {}
 
 # Upper bound on the CSP cleanup's backtracking (worst case is exponential)
 CSP_TIME_LIMIT_S = 30.0
@@ -610,7 +615,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
     return candidates, scored, score_map, candidate_scores, candidate_sources, web_candidates, db, clue_text_lookup
 
 
-def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, score_map, total, put_progress, _elapsed, cancel_event=None, solve_trace=None, trace_global=None):
+def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, score_map, total, put_progress, _elapsed, cancel_event=None, solve_trace=None, trace_global=None, live=None):
     """Run LLM iterative solver with CSP cleanup fallback.
 
     Returns (assignment, solved_count).
@@ -634,11 +639,11 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
 
     assignment = solve_with_llm(
         solver_input, clue_text_lookup, candidates,
-        max_passes=6,
         progress_callback=_llm_progress,
         candidate_scores=candidate_scores,
         solve_trace=solve_trace,
         trace_global=trace_global,
+        live=live,
     )
     logger.info(f"{_elapsed()} LLM solver: {len(assignment)}/{total}")
 
@@ -676,6 +681,8 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
             if trace_global:
                 trace_global("csp_done", f"+{len(csp_new)} from CSP, total {len(assignment)}/{total}")
 
+    if live:
+        live.commit(assignment, "Cleanup search")
     return assignment, len(assignment)
 
 
@@ -837,11 +844,20 @@ def _run_solve(
         _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event, solve_trace, _trace_global)
 
     # 2. Solve
-    assignment, solved = _run_solver(
-        solver_input, clue_text_lookup, candidates,
-        candidate_scores, score_map, total, put_progress, _elapsed, cancel_event,
-        solve_trace, _trace_global,
-    )
+    # Live solve view: answers as the model writes them, and each phase's
+    # changes, on the same progress stream (stage "live"). progress=-1 marks
+    # them as not progress updates.
+    live = LiveFeed(lambda event: put_progress(
+        SolveProgress(stage="live", message="", progress=-1, live=event)))
+    LIVE_FEEDS[session_id] = live
+    try:
+        assignment, solved = _run_solver(
+            solver_input, clue_text_lookup, candidates,
+            candidate_scores, score_map, total, put_progress, _elapsed, cancel_event,
+            solve_trace, _trace_global, live=live,
+        )
+    finally:
+        LIVE_FEEDS.pop(session_id, None)
 
     # 3. Save diagnostics
     _trace_global("diagnostics", f"Saving diagnostics for {total} clues")

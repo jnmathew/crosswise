@@ -282,3 +282,36 @@ class TestGridIntersectionFallback:
         with patch.object(grid_detection, "_detect_grid_lines_by_projection", return_value=(lines, lines)):
             with pytest.raises(ValueError, match="implausible"):
                 grid_detection.detect_grid(_grid_image(15), None)
+
+
+# --- Pass effort schedule -----------------------------------------------------------
+
+class TestPassEffortSchedule:
+    def _run(self, efforts, replies):
+        """Run solve_with_llm with solve_pass mocked; returns the efforts each pass used."""
+        si, cands = get_tiny_3x3()
+        used = []
+
+        def fake_pass(*args, effort="high", **kwargs):
+            used.append(effort)
+            return replies.pop(0) if replies else {}
+
+        with patch.object(llm_solver, "solve_pass", side_effect=fake_pass), \
+             patch.object(llm_solver, "prefill_from_db", return_value={}), \
+             patch.object(llm_solver, "propagate_constraints", return_value={}), \
+             patch.object(llm_solver, "find_conflict_clusters", return_value=[]), \
+             patch.object(llm_solver, "verify_and_repair", side_effect=lambda si, t, c, a, **k: (a, {})):
+            llm_solver.solve_with_llm(si, CLUE_TEXT, cands, pass_efforts=efforts)
+        return used
+
+    def test_follows_schedule(self):
+        replies = [{"1-across": "CAT"}, {"3-across": "BAD"}, {"1-down": "CAB"}, {"2-down": "TAD"}]
+        assert self._run(["medium", "low", "medium", "high"], replies) == ["medium", "low", "medium", "high"]
+
+    def test_empty_cheap_pass_escalates_to_high(self):
+        """An empty medium pass no longer ends the solve; the rest run at high."""
+        replies = [{"1-across": "CAT"}, {}, {"3-across": "BAD"}, {}]
+        assert self._run(["medium", "medium", "medium", "medium"], replies) == ["medium", "medium", "high", "high"]
+
+    def test_empty_high_pass_stops(self):
+        assert self._run(["high", "high", "high"], [{}]) == ["high"]

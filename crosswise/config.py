@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_OCR_MODEL: str = "gemini-3.5-flash"
 
+    # Effort per LLM solve pass; its length is the number of passes. A non-high
+    # pass that finds nothing new escalates the rest to high instead of ending
+    # the solve. Cheap passes first: on gauntlet 202 (2026-10-01) this schedule
+    # solved by pass 5 in 142s with no high pass, vs ~390s and a 209s high pass
+    # for the old medium/low/low/high... schedule; about even on 101.
+    # Override as JSON, e.g. SOLVER_PASS_EFFORTS='["medium","low","low","high","high","high"]'
+    SOLVER_PASS_EFFORTS: list[str] = ["low", "low", "medium", "medium", "medium", "high"]
+
     # Solver web search
     # Upfront web lookup for every pop-culture-looking clue. Off by default: on
     # gauntlet puzzle 104 it didn't change the solved grid and doubled the cost.

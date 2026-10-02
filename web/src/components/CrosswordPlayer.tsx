@@ -10,6 +10,8 @@ import {
 import { usePuzzle } from '../hooks/usePuzzle';
 import { useHints } from '../hooks/useHints';
 import { useSSE } from '../hooks/useSSE';
+import { useLiveSolve } from '../hooks/useLiveSolve';
+import LiveSolveOverlay from './LiveSolveOverlay';
 import { crosswordTheme, crosswordThemeDark } from '../styles/theme';
 import { useTheme } from '../hooks/useTheme';
 import HintPanel from './HintPanel';
@@ -185,7 +187,20 @@ export default function CrosswordPlayer() {
 
   // Connect SSE when puzzle is being solved
   const sseUrl = isSolving ? `/api/${puzzleId}/progress` : null;
-  const { data: progress, done: solveDone } = useSSE(sseUrl);
+  const { live, onLive } = useLiveSolve();
+  const { data: progress, done: solveDone } = useSSE(sseUrl, onLive);
+
+  // "Watch the solve": draw the solver's live grid over the player's grid.
+  // Remembered per browser; storage can be unavailable (private mode), so guard it.
+  const [watchSolve, setWatchSolve] = useState(() => {
+    try { return localStorage.getItem('crosswise-watch-solve') === 'on'; } catch { return false; }
+  });
+  const toggleWatchSolve = useCallback(() => {
+    setWatchSolve((on) => {
+      try { localStorage.setItem('crosswise-watch-solve', on ? 'off' : 'on'); } catch { /* ignore */ }
+      return !on;
+    });
+  }, []);
 
   // Show a toast that auto-dismisses after a timeout
   const showToast = useCallback((message: string, duration = 5000) => {
@@ -894,9 +909,36 @@ export default function CrosswordPlayer() {
           onClearWord={() => { handleClearWord(); refocusGrid(); }}
           onClearPuzzle={() => { handleClearPuzzle(); refocusGrid(); }}
         />
+        {(isSolving || live.events > 0) && (
+          <div className="live-toggle-row">
+            <button
+              type="button"
+              className="live-toggle"
+              aria-pressed={watchSolve}
+              onClick={toggleWatchSolve}
+              title="Show the solver's grid live, as answers stream in (spoilers!)"
+            >
+              {watchSolve ? 'Back to my grid' : 'Watch the solve'}
+            </button>
+            {watchSolve && (
+              <span>
+                {live.phase ?? 'Waiting for the first answers…'}
+                {' · '}
+                {Object.keys(live.committed).length}/{puzzle.clues.across.length + puzzle.clues.down.length} placed
+                {' · '}
+                <span className="live-legend-tentative">blue = just written</span>
+                {', '}
+                <span className="live-legend-rejected">red = rejected</span>
+              </span>
+            )}
+          </div>
+        )}
         <div style={styles.body} className="player-body">
           <div style={{ width: GRID_HEIGHT, height: gridHeight, flexShrink: 0, position: 'relative' }} className="player-grid">
             <CrosswordGrid />
+            {watchSolve && (isSolving || live.events > 0) && (
+              <LiveSolveOverlay puzzle={puzzle} live={live} />
+            )}
             {flashCells.length > 0 && puzzle && (
               <svg
                 style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 1 }}

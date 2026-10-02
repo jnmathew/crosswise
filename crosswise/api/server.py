@@ -19,6 +19,7 @@ from loguru import logger
 from crosswise.config import settings
 from crosswise.api.models import (
     SessionStatus,
+    SolveProgress,
     UploadResponse,
     MaskRequest,
     MaskResponse,
@@ -373,6 +374,15 @@ async def stream_progress(session_id: str):
         raise HTTPException(404, "No active solve for this session")
 
     async def event_generator():
+        # A viewer joining mid-solve (e.g. after a page reload) first gets the
+        # answers so far, then the live events that follow.
+        feed = pipeline.LIVE_FEEDS.get(session_id)
+        if feed is not None:
+            snapshot = feed.snapshot()
+            if snapshot:
+                event = SolveProgress(stage="live", message="", progress=-1,
+                                      live={"type": "snapshot", "answers": snapshot})
+                yield f"data: {event.model_dump_json()}\n\n"
         while True:
             try:
                 progress = await asyncio.wait_for(queue.get(), timeout=120)

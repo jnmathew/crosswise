@@ -13,7 +13,7 @@ import json
 import os
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import anthropic
 import requests
@@ -21,6 +21,7 @@ from loguru import logger
 
 from crosswise.solver.claude_client import OPUS_MODEL, SONNET_MODEL, create_message, response_text
 from crosswise.config import settings
+from crosswise.solver.live_feed import LiveFeed, listener as live_listener
 from crosswise.solver.models import SolverInput
 
 
@@ -227,6 +228,7 @@ def solve_pass(
     model: str = OPUS_MODEL,
     effort: str = "high",
     web_search: bool = False,
+    on_text: Optional[Callable[[str], None]] = None,
 ) -> Dict[ClueId, Word]:
     """Run one LLM solve pass. Returns new assignments from this pass.
 
@@ -329,7 +331,7 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
 
     try:
         for _turn in range(4):
-            response = create_message(client, messages=messages, **request)
+            response = create_message(client, on_text=on_text, messages=messages, **request)
             tracker.track(response, f"solve_pass_{pass_num}")
             if response.stop_reason != "pause_turn":
                 break
@@ -503,6 +505,7 @@ def resolve_conflict_cluster(
     cluster: Dict,
     model: str = OPUS_MODEL,
     effort: str = "high",
+    on_text: Optional[Callable[[str], None]] = None,
 ) -> Dict[ClueId, Word]:
     """Ask the LLM to re-solve a conflict cluster.
 
@@ -618,6 +621,7 @@ Return ONLY the JSON object."""
         for _turn in range(4):
             response = create_message(
                 client,
+                on_text=on_text,
                 model=model,
                 max_tokens=64000,
                 system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
@@ -803,6 +807,7 @@ def resolve_suspect_answers(
     suspects: Dict[ClueId, str],
     model: str = OPUS_MODEL,
     effort: str = "high",
+    on_text: Optional[Callable[[str], None]] = None,
 ) -> Dict[ClueId, Word]:
     """Clear suspect answers and every answer crossing them, then re-solve jointly.
 
@@ -857,6 +862,7 @@ Return ONLY a JSON object mapping clue_id to answer."""
         for _turn in range(4):
             response = create_message(
                 client,
+                on_text=on_text,
                 model=model,
                 max_tokens=64000,
                 system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
@@ -890,6 +896,7 @@ def verify_and_repair(
     candidates: Dict[str, List[str]],
     assignment: Dict[ClueId, Word],
     candidate_scores: Optional[Dict[str, Dict[str, float]]] = None,
+    live: Optional[LiveFeed] = None,
 ) -> Tuple[Dict[ClueId, Word], Dict[ClueId, str]]:
     """Review the fill, re-solve suspect answers, and repair any dead ends left.
 
@@ -902,18 +909,23 @@ def verify_and_repair(
     if not suspects:
         return assignment, suspects
 
+    lengths = {cid: len(cells) for cid, cells in solver_input.clue_cells.items()}
     assignment = resolve_suspect_answers(
         solver_input, clue_text_lookup, candidates, assignment, suspects,
+        on_text=live_listener(live, "Verification", lengths),
     )
     propagate_constraints(
         solver_input, candidates, assignment,
         candidate_scores=candidate_scores, clue_text_lookup=clue_text_lookup,
     )
+    if live:
+        live.commit(assignment, "Verification")
 
     if len(assignment) < len(solver_input.clue_cells):
         for cluster in find_conflict_clusters(solver_input, assignment, clue_text_lookup):
             new_answers = resolve_conflict_cluster(
                 solver_input, clue_text_lookup, candidates, assignment, cluster,
+                on_text=live_listener(live, "Verification", lengths),
             )
             if new_answers:
                 blamed = {b["clue_id"] for b in cluster["blamed"]}
@@ -930,10 +942,13 @@ def verify_and_repair(
         new_answers = solve_pass(
             solver_input, clue_text_lookup, candidates, assignment,
             pass_num=99, effort="high", web_search=settings.SOLVER_WEB_SEARCH,
+            on_text=live_listener(live, "Verification", lengths),
         )
         if new_answers:
             assignment = validate_assignment(solver_input, {**assignment, **new_answers})
 
+    if live:
+        live.commit(assignment, "Verification")
     return assignment, suspects
 
 
@@ -1224,18 +1239,27 @@ def solve_with_llm(
     solver_input: SolverInput,
     clue_text_lookup: Dict[str, str],
     candidates: Dict[str, List[str]],
-    max_passes: int = 6,
+    pass_efforts: Optional[List[str]] = None,
     progress_callback=None,
     candidate_scores: Optional[Dict[str, Dict[str, float]]] = None,
     solve_trace: Optional[Dict[str, dict]] = None,
     trace_global=None,
+    live: Optional[LiveFeed] = None,
 ) -> Dict[ClueId, Word]:
     """
     Iterative LLM-based crossword solver.
 
-    Returns a full or partial assignment.
+    Returns a full or partial assignment. ``live`` (optional) receives answers
+    as the model writes them and each phase's changes, for the live solve view.
     """
     total = len(solver_input.clue_cells)
+    lengths = {cid: len(cells) for cid, cells in solver_input.clue_cells.items()}
+    efforts = list(pass_efforts or settings.SOLVER_PASS_EFFORTS)
+    max_passes = len(efforts)
+
+    def commit(phase: str) -> None:
+        if live:
+            live.commit(assignment, phase)
 
     # Phase 0: Pre-fill from DB (single-candidate clues)
     assignment = prefill_from_db(solver_input, candidates)
@@ -1246,9 +1270,11 @@ def solve_with_llm(
                 solve_trace[cid]["solved_by"] = "db_prefill"
         if trace_global:
             trace_global("db_prefill", f"{len(assignment)}/{total} locked in from DB")
+    commit("Clue database")
 
     t0 = time.time()
 
+    escalated = False  # set when a cheaper pass stalls; later passes run at high
     for pass_num in range(1, max_passes + 1):
         remaining = total - len(assignment)
         if remaining == 0:
@@ -1260,15 +1286,13 @@ def solve_with_llm(
         if progress_callback:
             progress_callback(pass_num, len(assignment), total)
 
-        # Pass 1 seeds every later pass with crossing letters, so a wrong
-        # commit there propagates: run it at medium. Passes 2-3 are checked by
-        # those crossings and run at low; late passes get high.
-        effort = "medium" if pass_num == 1 else "low" if pass_num <= 3 else "high"
+        effort = "high" if escalated else efforts[pass_num - 1]
         new_answers = solve_pass(
             solver_input, clue_text_lookup, candidates,
             assignment, pass_num,
             effort=effort,
             web_search=pass_num >= 4 and settings.SOLVER_WEB_SEARCH,
+            on_text=live_listener(live, f"Pass {pass_num}", lengths),
         )
 
         if new_answers is None:
@@ -1279,6 +1303,12 @@ def solve_with_llm(
             continue
 
         if not new_answers:
+            # A cheaper pass finding nothing means the rest need more
+            # reasoning, not that they're unsolvable
+            if effort != "high":
+                logger.info(f"No new answers at {effort} effort — escalating remaining passes to high")
+                escalated = True
+                continue
             logger.info("No new answers — LLM is stuck")
             break
 
@@ -1291,6 +1321,7 @@ def solve_with_llm(
         rejected = len(new_answers) - len(new_valid)
 
         assignment = validated
+        commit(f"Pass {pass_num}")
         elapsed = time.time() - t0
         logger.info(f"[{elapsed:.1f}s] +{len(new_valid)} answers ({rejected} rejected for conflicts), total: {len(assignment)}/{total}")
 
@@ -1302,6 +1333,10 @@ def solve_with_llm(
             trace_global(f"llm_pass_{pass_num}", f"+{len(new_valid)} answers ({rejected} rejected), total {len(assignment)}/{total}")
 
         if len(new_valid) == 0:
+            if effort != "high":
+                logger.info(f"All new answers conflicted at {effort} effort — escalating remaining passes to high")
+                escalated = True
+                continue
             logger.info("All new answers conflicted — stopping")
             break
 
@@ -1315,6 +1350,7 @@ def solve_with_llm(
             candidate_scores=candidate_scores,
             clue_text_lookup=clue_text_lookup,
         )
+        commit("Crossing logic")
         if prop_commits:
             elapsed = time.time() - t0
             logger.info(f"[{elapsed:.1f}s] +{len(prop_commits)} from constraint propagation, total: {len(assignment)}/{total}")
@@ -1352,6 +1388,7 @@ def solve_with_llm(
                 new_answers = resolve_conflict_cluster(
                     solver_input, clue_text_lookup, candidates,
                     assignment, cluster,
+                    on_text=live_listener(live, "Conflict fix", lengths),
                 )
 
                 if new_answers is None:
@@ -1372,6 +1409,7 @@ def solve_with_llm(
 
                     old_count = len(assignment)
                     assignment = validated
+                    commit("Conflict fix")
                     delta = len(assignment) - old_count
                     elapsed = time.time() - t0
                     logger.info(f"[{elapsed:.1f}s] Resolved: {len(assignment)}/{total} "
@@ -1395,12 +1433,14 @@ def solve_with_llm(
                     assignment, pass_num=max_passes + 1,
                     effort="high",
                     web_search=settings.SOLVER_WEB_SEARCH,
+                    on_text=live_listener(live, "Follow-up pass", lengths),
                 )
                 if new_answers:
                     trial = {**assignment, **new_answers}
                     validated = validate_assignment(solver_input, trial)
                     new_valid = {cid: w for cid, w in new_answers.items() if cid in validated}
                     assignment = validated
+                    commit("Follow-up pass")
                     elapsed = time.time() - t0
                     logger.info(f"[{elapsed:.1f}s] +{len(new_valid)} from post-resolution, total: {len(assignment)}/{total}")
                     if solve_trace:
@@ -1420,6 +1460,7 @@ def solve_with_llm(
             candidate_scores=candidate_scores,
             clue_text_lookup=clue_text_lookup,
         )
+        commit("Crossing logic")
         if final_commits:
             elapsed = time.time() - t0
             logger.info(f"[{elapsed:.1f}s] +{len(final_commits)} from final propagation, total: {len(assignment)}/{total}")
@@ -1437,7 +1478,7 @@ def solve_with_llm(
         before = dict(assignment)
         assignment, suspects = verify_and_repair(
             solver_input, clue_text_lookup, candidates, assignment,
-            candidate_scores=candidate_scores,
+            candidate_scores=candidate_scores, live=live,
         )
         if suspects:
             elapsed = time.time() - t0

@@ -34,7 +34,14 @@ export interface SolveProgress {
   message: string;
   progress: number;
   warning?: string;
+  live?: LiveEvent; // set when stage === 'live'
 }
+
+/** Live solve view events (see crosswise/solver/live_feed.py). */
+export type LiveEvent =
+  | { type: 'snapshot'; answers: Record<string, string> }
+  | { type: 'tentative'; phase: string; clue: string; word: string }
+  | { type: 'commit'; phase: string; answers: Record<string, string>; removed: string[]; total: number };
 
 export interface GridEditResponse {
   clue_slot_count: number;

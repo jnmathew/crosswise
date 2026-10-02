@@ -52,6 +52,8 @@ class SolveProgress(BaseModel):
     message: str
     progress: float  # 0.0 to 1.0
     warning: Optional[str] = None
+    # Live solve view events (stage == "live"); see crosswise/solver/live_feed.py
+    live: Optional[dict] = None
 
 
 class SolveStatusResponse(BaseModel):
