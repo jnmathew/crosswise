@@ -20,6 +20,7 @@ import requests
 from loguru import logger
 
 from crosswise.solver.claude_client import OPUS_MODEL, SONNET_MODEL, create_message, response_text
+from crosswise.config import settings
 from crosswise.solver.models import SolverInput
 
 
@@ -223,8 +224,14 @@ def solve_pass(
     pass_num: int,
     model: str = OPUS_MODEL,
     effort: str = "high",
+    web_search: bool = False,
 ) -> Dict[ClueId, Word]:
-    """Run one LLM solve pass. Returns new assignments from this pass."""
+    """Run one LLM solve pass. Returns new assignments from this pass.
+
+    With ``web_search``, the model may look up proper nouns or recent
+    references it is unsure of (capped per pass); it decides when to search,
+    so a pass that needs no lookups costs nothing extra.
+    """
 
     unsolved = [
         cid for cid in solver_input.clue_cells
@@ -304,21 +311,29 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
     # Opus 5.5 always thinks, and thinking counts toward max_tokens, so leave
     # room for it on top of the JSON answer.
     client = anthropic.Anthropic(timeout=300.0)
+    request = dict(
+        model=model,
+        max_tokens=16000,
+        system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        output_config={"effort": effort},
+    )
+    if web_search:
+        request["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}]
+    messages = [{"role": "user", "content": prompt}]
+    tracker = get_tracker()
 
     try:
-        response = create_message(
-            client,
-            model=model,
-            max_tokens=16000,
-            system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            output_config={"effort": effort},
-            messages=[{"role": "user", "content": prompt}],
-        )
+        for _turn in range(4):
+            response = create_message(client, messages=messages, **request)
+            tracker.track(response, f"solve_pass_{pass_num}")
+            if response.stop_reason != "pause_turn":
+                break
+            # Server-side search loop paused mid-turn; append and resume.
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": "Continue. Return the JSON answer."})
     except Exception as e:
         logger.error(f"API error in solve_pass {pass_num}: {e}")
         return None  # None signals API error (vs {} for no answers)
-
-    get_tracker().track(response, f"solve_pass_{pass_num}")
 
     text = response_text(response, f"solve_pass_{pass_num}")
     # Strip markdown fences if present
@@ -332,16 +347,17 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
     try:
         new_answers = json.loads(text)
     except json.JSONDecodeError:
-        # Try to find JSON object in the text
-        json_match = re.search(r'\{[^{}]*\}', text)
-        if json_match:
+        # Find the JSON object in surrounding text. Take the last one that
+        # parses: with web search, narration precedes the final answer.
+        new_answers = None
+        for candidate in reversed(re.findall(r'\{[^{}]*\}', text)):
             try:
-                new_answers = json.loads(json_match.group())
+                new_answers = json.loads(candidate)
+                break
             except json.JSONDecodeError:
-                logger.warning("Could not parse LLM response")
-                return {}
-        else:
-            logger.warning("No JSON found in LLM response")
+                continue
+        if new_answers is None:
+            logger.warning("No parseable JSON found in LLM response")
             return {}
 
     # Validate: correct length, matches pattern, and is in candidates (if we have them)
@@ -1000,6 +1016,7 @@ def solve_with_llm(
             solver_input, clue_text_lookup, candidates,
             assignment, pass_num,
             effort="low" if pass_num <= 3 else "high",
+            web_search=pass_num >= 4 and settings.SOLVER_WEB_SEARCH,
         )
 
         if new_answers is None:
@@ -1125,6 +1142,7 @@ def solve_with_llm(
                     solver_input, clue_text_lookup, candidates,
                     assignment, pass_num=max_passes + 1,
                     effort="high",
+                    web_search=settings.SOLVER_WEB_SEARCH,
                 )
                 if new_answers:
                     trial = {**assignment, **new_answers}

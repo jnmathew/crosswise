@@ -438,6 +438,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
         web_search_prepass,
     )
     from crosswise.solver.claude_client import SONNET_MODEL
+    from crosswise.config import settings
     from crosswise.solver.clue_database import ClueDatabase
     from crosswise.solver.word_index import get_word_index
 
@@ -469,11 +470,13 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
         if trace_global:
             trace_global("db_lookup", f"{db_hits}/{len(clue_inputs)} clues had DB hits")
 
-    # Web search pre-pass
+    # Web search pre-pass (off by default; late solve passes search on demand)
     _check_cancel(cancel_event)
-    logger.info(f"{_elapsed()} Running web search pre-pass")
-    put_progress(SolveProgress(stage="candidates", message="Web search pre-pass...", progress=0.12))
-    web_candidates = web_search_prepass(clue_inputs)
+    web_candidates: Dict[str, str] = {}
+    if settings.WEB_PREPASS_ENABLED:
+        logger.info(f"{_elapsed()} Running web search pre-pass")
+        put_progress(SolveProgress(stage="candidates", message="Web search pre-pass...", progress=0.12))
+        web_candidates = web_search_prepass(clue_inputs)
 
     for cid, word in web_candidates.items():
         existing = candidates.get(cid, [])

@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_OCR_MODEL: str = "gemini-3.5-flash"
 
+    # Solver web search
+    # Upfront web lookup for every pop-culture-looking clue. Off by default: on
+    # gauntlet puzzle 104 it didn't change the solved grid and doubled the cost.
+    WEB_PREPASS_ENABLED: bool = False
+    # Let the high-effort solve passes (4+) call web search when the model
+    # decides it needs to, targeting only clues still unsolved by then.
+    SOLVER_WEB_SEARCH: bool = True
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # or "text"
