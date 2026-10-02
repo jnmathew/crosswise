@@ -11,6 +11,7 @@ Supports semicolon-scored format (WORD;SCORE) and plain word-per-line format.
 """
 
 import re
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -129,3 +130,20 @@ class WordIndex:
     @property
     def size(self) -> int:
         return len(self._words)
+
+
+_default_index: Optional[WordIndex] = None
+_default_index_lock = threading.Lock()
+
+
+def get_word_index() -> WordIndex:
+    """Return a process-wide WordIndex over the default word lists.
+
+    Loading ~600K words takes seconds, so solver phases share one instance
+    instead of rebuilding it per call. The index is read-only after load.
+    """
+    global _default_index
+    with _default_index_lock:
+        if _default_index is None:
+            _default_index = WordIndex()
+        return _default_index

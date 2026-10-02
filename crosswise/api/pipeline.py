@@ -438,6 +438,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
         web_search_prepass,
     )
     from crosswise.solver.clue_database import ClueDatabase
+    from crosswise.solver.word_index import get_word_index
 
     # Build clue text lookup for bouncer filter
     clue_text_lookup = {}
@@ -572,7 +573,7 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
 
     # Bouncer filter: score and sort candidates
     put_progress(SolveProgress(stage="candidates", message="Scoring candidates...", progress=0.25))
-    scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
+    scored = bouncer_filter(candidates, db=db, word_index=get_word_index(), clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
     score_map = to_score_map(scored)
     candidates = to_plain_candidates(scored)
 
@@ -653,8 +654,9 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
 def _save_diagnostics(clue_inputs, clue_text_lookup, candidates, candidate_sources, web_candidates, assignment, db, session_dir, solve_trace=None, global_trace=None):
     """Build and save per-clue solve diagnostics JSON."""
     from crosswise.solver.candidates import bouncer_filter
+    from crosswise.solver.word_index import get_word_index
 
-    final_scored = bouncer_filter(candidates, db=db, clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
+    final_scored = bouncer_filter(candidates, db=db, word_index=get_word_index(), clue_text_lookup=clue_text_lookup, candidate_sources=candidate_sources, web_candidates=web_candidates)
 
     diagnostics = []
     for ci in clue_inputs:

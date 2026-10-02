@@ -378,8 +378,8 @@ def find_conflict_clusters(
     trace back to the committed crossing answers that created the impossible
     pattern. Group connected dead-ends into clusters for joint resolution.
     """
-    from crosswise.solver.word_index import WordIndex
-    word_index = WordIndex()
+    from crosswise.solver.word_index import get_word_index
+    word_index = get_word_index()
 
     unsolved = [cid for cid in solver_input.clue_cells if cid not in assignment]
     if not unsolved:
@@ -822,8 +822,8 @@ def propagate_constraints(
     Returns:
         Dict of newly committed clue_id -> word (subset added to assignment).
     """
-    from crosswise.solver.word_index import WordIndex
-    word_index = WordIndex()
+    from crosswise.solver.word_index import get_word_index
+    word_index = get_word_index()
 
     new_commits: Dict[ClueId, Word] = {}
     changed = True

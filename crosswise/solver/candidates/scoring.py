@@ -5,6 +5,8 @@ Pure evaluation layer -- no generation responsibility.
 
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from crosswise.solver.clue_database import normalize_clue_text
+
 from .models import ScoredCandidate
 
 if TYPE_CHECKING:
@@ -117,7 +119,7 @@ def bouncer_filter(
                     if is_in_db and clue_text:
                         cursor2 = db._conn.execute(
                             "SELECT 1 FROM clues WHERE clue_normalized = ? AND answer = ? LIMIT 1",
-                            (clue_text.lower(), word_upper),
+                            (normalize_clue_text(clue_text), word_upper),
                         )
                         is_clue_match = cursor2.fetchone() is not None
                 except Exception:
