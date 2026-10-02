@@ -108,7 +108,7 @@ For extracting crossword clues from newspaper images:
 - `database.py` - `generate_candidates_with_database()`, `regenerate_with_patterns()` — SQLite lookup
 - `claude.py` - `generate_with_claude()`, `ensure_minimum_candidates()`, `generate_with_extended_thinking()` — Claude Opus/Sonnet generation
 - `scoring.py` - `bouncer_filter()`, `categorize_clue()`, `compute_target_domain_size()` — candidate scoring (0.3–1.0)
-- `web_prepass.py` - `web_search_prepass()` — Haiku web search for pop culture clues in parallel
+- `web_prepass.py` - `web_search_prepass()` — Sonnet web search for pop culture clues in parallel
 - `models.py` - `ClueInput`, `ScoredCandidate`, `_matches_pattern()` — shared data types
 - `prompts.py` - `_build_prompt()`, `_parse_response()` — shared LLM prompt logic
 
@@ -123,13 +123,13 @@ For extracting crossword clues from newspaper images:
 - `solve_pass()` — single-turn Opus call (no web search, no multi-turn continuation)
 - `find_conflict_clusters()` — detects dead-end patterns (crossing letters match no valid word), traces blame to wrong committed answers, groups into connected clusters
 - `resolve_conflict_cluster()` — removes blamed answers from grid, asks LLM to re-solve the cluster jointly with web search available (Anthropic `web_search_20260209`)
-- `propagate_constraints()` — zero-cost logic: auto-commits clues where crossing patterns eliminate all but one candidate; handles fully-constrained patterns via word index + dictionary API + Haiku verification
+- `propagate_constraints()` — zero-cost logic: auto-commits clues where crossing patterns eliminate all but one candidate; handles fully-constrained patterns via word index + dictionary API + Sonnet verification
 - Post-resolution follow-up pass picks up newly-unblocked clues after conflict resolution frees crossing letters
 
 **cost_tracker.py** - API cost tracking:
 - Thread-safe `CostTracker` accumulates costs across all API calls during a solve
 - Tracks input/output tokens, cache write (1.25x) and per-model cache read tokens, web search ($0.01/query)
-- Pricing: Opus 5.5 ($4/$20, cache reads 0.05x), Sonnet 5.5 ($2/$10), Haiku 4.5 ($1/$5) per MTok
+- Pricing: Opus 5.5 ($4/$20, cache reads 0.05x), Sonnet 5.5 ($2/$10) per MTok
 - Model IDs live in `crosswise/solver/claude_client.py`; Opus/Sonnet 5.5 calls go through `create_message()` (server-side refusal fallback) and `response_text()` (reads text blocks by type — 5.5 models always think)
 - Per-call logging and phase-grouped summary at end of solve
 
@@ -139,14 +139,14 @@ For extracting crossword clues from newspaper images:
 
 **Solving Strategy** (LLM solver — default):
 1. Database lookup finds ~70% of clues from ~9-11M historical pairs (xd + CrosswordQA)
-2. Haiku web search pre-pass for pop culture clues (~$0.01-0.03/clue)
+2. Sonnet web search pre-pass for pop culture clues (~$0.01-0.03/clue)
 3. Claude Opus fallback generates candidates for remaining clues
 4. Bouncer filter scores all candidates by DB/word-index verification (+0.1 web confirmation bonus)
 5. LLM iterative solve: 6 single-turn Opus passes of commit → propagate crossing letters → re-solve
 6. Constraint propagation: auto-commit clues where crossing patterns leave one candidate (zero API cost)
 7. Conflict resolution: detect dead-end patterns → trace blamed crossings → LLM re-solves clusters (with web search)
 8. Post-resolution constraint propagation + follow-up pass
-9. Fully-constrained pattern handling: dictionary API + Haiku verification for words not in candidate list
+9. Fully-constrained pattern handling: dictionary API + Sonnet verification for words not in candidate list
 10. CSP cleanup for any remaining unsolved clues
 11. Hint generation runs in parallel after solve
 

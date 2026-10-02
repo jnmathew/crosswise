@@ -1,7 +1,7 @@
-"""Haiku web search pre-pass for pop culture clues.
+"""Sonnet web search pre-pass for pop culture clues.
 
 Independent enrichment phase: detects pop culture clues (quotes, proper nouns,
-media references) and fires parallel Haiku web searches to get verified answers.
+media references) and fires parallel Sonnet web searches to get verified answers.
 """
 
 import os
@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from crosswise.solver.claude_client import HAIKU_MODEL
+from crosswise.solver.claude_client import SONNET_MODEL, create_message
 
 from .models import ClueInput
 
@@ -63,7 +63,7 @@ def _is_pop_culture_clue(text: str) -> bool:
 
 
 def _extract_answer(raw: str, expected_length: int) -> Optional[str]:
-    """Extract a valid answer from Haiku's response text.
+    """Extract a valid answer from the model's response text.
 
     Handles common response formats:
     - "SAM" (clean)
@@ -96,11 +96,11 @@ def _extract_answer(raw: str, expected_length: int) -> Optional[str]:
 def web_search_prepass(
     clues: List[ClueInput],
 ) -> Dict[str, str]:
-    """Run pop-culture clues through Haiku with web search to get verified candidates.
+    """Run pop-culture clues through Sonnet with web search to get verified candidates.
 
     Filters clues to those broadly referencing pop culture (proper nouns, media,
-    fill-in-the-blank with names), then fires individual Haiku calls in parallel.
-    Each call has web_search available (max_uses=1); Haiku decides whether to search.
+    fill-in-the-blank with names), then fires individual Sonnet calls in parallel.
+    Each call has web_search available (max_uses=1); the model decides whether to search.
 
     Args:
         clues: All clue inputs for the puzzle.
@@ -130,7 +130,7 @@ def web_search_prepass(
     def _search_one(clue: ClueInput) -> Optional[tuple]:
         """Search for one clue. Returns (clue_id, answer) or None."""
         try:
-            client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
+            client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
 
             prompt = (
                 f'Crossword clue: "{clue.text}" ({clue.length} letters)\n\n'
@@ -138,21 +138,26 @@ def web_search_prepass(
                 f'the {clue.length}-letter answer in uppercase. Nothing else.'
             )
 
+            # Structured outputs can't be used here (web search results carry
+            # citations), so the answer is still scraped by _extract_answer.
             tools = [{
-                "type": "web_search_20250305",
+                "type": "web_search_20260209",
                 "name": "web_search",
                 "max_uses": 1,
             }]
 
             messages = [{"role": "user", "content": prompt}]
 
-            response = client.messages.create(
-                model=HAIKU_MODEL,
-                max_tokens=200,
-                messages=messages,
+            # Low effort for a lookup; max_tokens covers thinking plus the
+            # dynamic-filtering code the search tool generates.
+            request = dict(
+                model=SONNET_MODEL,
+                max_tokens=8000,
+                output_config={"effort": "low"},
                 tools=tools,
             )
-            tracker.track(response, "web_prepass", model=HAIKU_MODEL)
+            response = create_message(client, messages=messages, **request)
+            tracker.track(response, "web_prepass")
 
             # Handle pause_turn -- follow up until we get a final answer (max 3 continuations)
             for _ in range(3):
@@ -160,16 +165,15 @@ def web_search_prepass(
                     break
                 messages.append({"role": "assistant", "content": response.content})
                 messages.append({"role": "user", "content": f"Reply with ONLY the {clue.length}-letter answer in uppercase."})
-                response = client.messages.create(
-                    model=HAIKU_MODEL,
-                    max_tokens=200,
-                    messages=messages,
-                    tools=tools,
-                )
-                tracker.track(response, "web_prepass_cont", model=HAIKU_MODEL)
+                response = create_message(client, messages=messages, **request)
+                tracker.track(response, "web_prepass_cont")
+
+            if response.stop_reason == "refusal":
+                logger.debug(f"Web pre-pass {clue.clue_id}: declined")
+                return None
 
             # Extract answer from response
-            text_parts = [b.text for b in response.content if hasattr(b, "text")]
+            text_parts = [b.text for b in response.content if b.type == "text"]
             raw = "".join(text_parts).strip()
 
             # Try to extract a word of the right length from the response

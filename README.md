@@ -65,7 +65,7 @@ These results come from the 2026-03-05 test run (`internal_dev/gauntlet/results.
 | Iterative solving | `claude-opus-4-20250514` |
 | Hint generation | `claude-sonnet-4-20250514` |
 
-> **The current code defaults differ.** As of 2026-10-01 the pipeline points at Opus 5.5 (`claude-opus-5-5`), Sonnet 5.5 (`claude-sonnet-5-5`), Haiku 4.5 (`claude-haiku-4-5-20251001`), and Gemini 3.5 Flash (`gemini-3.5-flash`). The figures above reflect the 2026-03-05 model set only and have not been re-validated against the newer models.
+> **The current code defaults differ.** As of 2026-10-01 the pipeline points at Opus 5.5 (`claude-opus-5-5`), Sonnet 5.5 (`claude-sonnet-5-5`, which also replaces Haiku for the web pre-pass), and Gemini 3.5 Flash (`gemini-3.5-flash`). The figures above reflect the 2026-03-05 model set only and have not been re-validated against the newer models.
 
 ## Demo
 
@@ -116,7 +116,7 @@ make run
 The solver uses a tiered strategy that minimizes API cost while maintaining accuracy:
 
 1. **Database lookup** — instant SQLite query resolves ~78% of clues from 10.1M historical pairs
-2. **Web pre-pass** — Haiku web search identifies pop culture, celebrity, and current-event clues
+2. **Web pre-pass** — Sonnet web search identifies pop culture, celebrity, and current-event clues
 3. **Candidate generation** — parallel Claude Opus + Sonnet calls generate candidates for remaining clues
 4. **Bouncer scoring** — cross-references all candidates against the database and word index (0.3-1.0 confidence)
 5. **LLM iterative solving** — 6 Opus passes: commit high-confidence answers, propagate crossing letters, re-solve
@@ -141,7 +141,7 @@ web/                React + TypeScript + Vite interactive player
 
 ## Tech stack
 
-**Backend**: Python 3.11, FastAPI, OpenCV, Gemini 3.5 Flash, Claude Opus/Sonnet/Haiku, SQLite
+**Backend**: Python 3.11, FastAPI, OpenCV, Gemini 3.5 Flash, Claude Opus/Sonnet, SQLite
 
 **Frontend**: React 18, TypeScript, Vite, react-crossword, Server-Sent Events
 

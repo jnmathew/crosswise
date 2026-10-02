@@ -19,7 +19,7 @@ import anthropic
 import requests
 from loguru import logger
 
-from crosswise.solver.claude_client import HAIKU_MODEL, OPUS_MODEL, create_message, response_text
+from crosswise.solver.claude_client import OPUS_MODEL, SONNET_MODEL, create_message, response_text
 from crosswise.solver.models import SolverInput
 
 
@@ -726,12 +726,20 @@ def _get_dictionary_definitions(word: str) -> Optional[str]:
         return None
 
 
-def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
-    """Verify a fully-constrained word fits the clue using dictionary + Haiku.
+_VERIFY_SCHEMA = {
+    "type": "object",
+    "properties": {"correct": {"type": "boolean"}},
+    "required": ["correct"],
+    "additionalProperties": False,
+}
+
+
+def _dictionary_and_llm_confirm(word: str, clue_text: str) -> bool:
+    """Verify a fully-constrained word fits the clue using dictionary + Sonnet.
 
     1. Fetch dictionary definitions (free API)
     2. Quick word-overlap check — if clue word appears in definition, accept
-    3. Otherwise, ask Haiku with the definition text: "does this word fit this clue?"
+    3. Otherwise, ask Sonnet with the definition text: "does this word fit this clue?"
 
     Returns True on network failures (benefit of the doubt).
     """
@@ -763,7 +771,7 @@ def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
                     logger.debug(f"Dictionary match: '{cw}' found in definition of {word}")
                     return True
 
-    # Step 3: Ask Haiku — is this word a valid answer for this clue?
+    # Step 3: Ask Sonnet — is this word a valid answer for this clue?
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return True  # Can't verify, allow it
@@ -777,18 +785,25 @@ def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
         prompt = f'Crossword clue: "{clue_text}"\nProposed answer: {word}'
         if def_text:
             prompt += f'\nDictionary definition of {word}: {def_text}'
-        prompt += '\n\nIs this answer correct for this crossword clue? Reply with ONLY "yes" or "no".'
+        prompt += '\n\nIs this answer correct for this crossword clue?'
 
-        response = client.messages.create(
-            model=HAIKU_MODEL,
-            max_tokens=10,
+        # Yes/no judgment: low effort, with a boolean schema so the verdict
+        # never has to be scraped out of free text.
+        response = create_message(
+            client,
+            model=SONNET_MODEL,
+            max_tokens=2000,
+            output_config={
+                "effort": "low",
+                "format": {"type": "json_schema", "schema": _VERIFY_SCHEMA},
+            },
             messages=[{"role": "user", "content": prompt}],
         )
-        get_tracker().track(response, "verify_word", model=HAIKU_MODEL)
+        get_tracker().track(response, "verify_word")
 
-        answer = response.content[0].text.strip().lower()
-        confirmed = answer.startswith("yes")
-        logger.debug(f"Haiku verification: {word} for \"{clue_text}\" → {answer}")
+        text = response_text(response, "verify_word")
+        confirmed = bool(text) and json.loads(text)["correct"]
+        logger.debug(f"Sonnet verification: {word} for \"{clue_text}\" → {confirmed}")
         return confirmed
 
     except Exception:
@@ -831,7 +846,7 @@ def propagate_constraints(
 
     new_commits: Dict[ClueId, Word] = {}
     # (clue_id, word) pairs verification already rejected; the outer loop
-    # revisits every forced pattern each round, so skip re-asking Haiku.
+    # revisits every forced pattern each round, so skip re-asking Sonnet.
     rejected: set = set()
     changed = True
 
@@ -870,11 +885,11 @@ def propagate_constraints(
                         changed = True
                         logger.debug(f"{cid} = {pattern} (fully constrained, in candidates)")
                 else:
-                    # Word NOT in candidates — use dictionary + Haiku to verify it fits the clue
+                    # Word NOT in candidates — use dictionary + Sonnet to verify it fits the clue
                     if (cid, pattern) in rejected:
                         continue
                     clue_text = clue_text_lookup.get(cid, "") if clue_text_lookup else ""
-                    confirmed = _dictionary_and_haiku_confirm(pattern, clue_text)
+                    confirmed = _dictionary_and_llm_confirm(pattern, clue_text)
                     if not confirmed:
                         rejected.add((cid, pattern))
                     if confirmed:

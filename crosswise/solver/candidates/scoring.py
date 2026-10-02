@@ -81,7 +81,7 @@ def bouncer_filter(
     - Source: DB-verified (0.8), word-index-verified (0.6), unverified (0.3)
     - Broda bonus: up to +0.15 from word index quality score
     - Clue-text match bonus: +0.1 if candidate was seen as answer to this clue in DB
-    - Web confirmation bonus: +0.1 if candidate matches Haiku web pre-pass result
+    - Web confirmation bonus: +0.1 if candidate matches Sonnet web pre-pass result
 
     Candidates sorted by composite score (highest first).
 
@@ -91,7 +91,7 @@ def bouncer_filter(
         word_index: WordIndex for membership testing and Broda scores
         clue_text_lookup: Optional dict of clue_id -> clue text (for DB clue match bonus)
         candidate_sources: Optional dict of clue_id -> {word -> source_label} for accurate source tracking
-        web_candidates: Optional dict of clue_id -> web-verified answer from Haiku pre-pass
+        web_candidates: Optional dict of clue_id -> web-verified answer from Sonnet pre-pass
 
     Returns:
         Dict mapping clue_id to list of ScoredCandidate, sorted by score.
@@ -147,7 +147,7 @@ def bouncer_filter(
             # Clue-text match bonus
             clue_bonus = 0.1 if is_clue_match else 0.0
 
-            # Web confirmation bonus: candidate matches Haiku web pre-pass result
+            # Web confirmation bonus: candidate matches Sonnet web pre-pass result
             web_bonus = 0.0
             if web_candidates and clue_id in web_candidates:
                 if word_upper == web_candidates[clue_id]:

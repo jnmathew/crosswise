@@ -8,8 +8,6 @@ from loguru import logger
 
 OPUS_MODEL = "claude-opus-5-5"
 SONNET_MODEL = "claude-sonnet-5-5"
-# Haiku 4.5 is the current Haiku; retirement is "not sooner than 2026-10-15".
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
 # Server-side refusal fallback: on a safety-classifier decline the API re-runs
 # the request on the model Anthropic recommends for that refusal category.
