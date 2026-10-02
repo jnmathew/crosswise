@@ -21,6 +21,10 @@ from crosswise.api.storage import write_json_atomic
 from crosswise.solver.cost_tracker import submit_in_context
 
 
+# Upper bound on the CSP cleanup's backtracking (worst case is exponential)
+CSP_TIME_LIMIT_S = 30.0
+
+
 class SolveCancelled(Exception):
     """Raised when a solve is cancelled by the user."""
 
@@ -29,6 +33,19 @@ def _check_cancel(cancel_event: Optional[threading.Event]):
     """Raise SolveCancelled if the cancel event is set."""
     if cancel_event and cancel_event.is_set():
         raise SolveCancelled("Solve cancelled by user")
+
+
+def _current_name(puzzle_path: Path) -> Optional[str]:
+    """The puzzle's current display name on disk, if any.
+
+    Writers that rebuild the whole puzzle JSON keep this, so a rename made
+    while OCR or a solve is running isn't overwritten when they save.
+    """
+    try:
+        with open(puzzle_path) as f:
+            return json.load(f).get("metadata", {}).get("name")
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _serialize_and_save_grid(cells, clue_slots, session_dir: Path) -> Dict[str, Any]:
@@ -272,6 +289,7 @@ def build_preliminary_puzzle(session_dir: Path, puzzles_dir: Path, puzzle_id: st
 
     puzzles_dir.mkdir(parents=True, exist_ok=True)
     puzzle_path = puzzles_dir / f"{puzzle_id}.json"
+    puzzle["metadata"]["name"] = _current_name(puzzle_path) or puzzle["metadata"]["name"]
     write_json_atomic(puzzle_path, puzzle, indent=2)
 
     # Also save to session dir for solve step
@@ -636,12 +654,19 @@ def _run_solver(solver_input, clue_text_lookup, candidates, candidate_scores, sc
             message=f"CSP cleanup: {csp_remaining} clues remaining...",
             progress=0.55,
         ))
+        # The LLM's answers are locked: the search only fills blanks around
+        # them. Accept its result only if every existing answer survives; an
+        # unlocked search once returned a "bigger" fill that replaced correct
+        # answers with candidate-list words (CAT/CAB/BAD -> COT/COB/BED).
         r = solve_csp(
             solver_input, candidates, return_partial=True,
             candidate_scores=score_map, mac_mode="search-only",
-            seed_assignment=assignment,
+            locked=assignment, time_limit_s=CSP_TIME_LIMIT_S,
+            should_stop=cancel_event.is_set if cancel_event else None,
         )
-        if len(r.assignment) > len(assignment):
+        _check_cancel(cancel_event)
+        keeps_all = all(r.assignment.get(cid) == word for cid, word in assignment.items())
+        if keeps_all and len(r.assignment) > len(assignment):
             csp_new = set(r.assignment.keys()) - set(assignment.keys())
             assignment = r.assignment
             logger.info(f"{_elapsed()} CSP cleanup: {len(assignment)}/{total}")
@@ -835,8 +860,12 @@ def _run_solve(
     session_mgr.update_status(session_id, SessionStatus.GENERATING_HINTS)
     _generate_and_apply_hints(puzzle_data, assignment, put_progress, _elapsed)
 
-    # Save enriched puzzle
+    # Save enriched puzzle (a cancel during hint generation skips the write)
+    _check_cancel(cancel_event)
     puzzle_path = puzzles_dir / f"{puzzle_id}.json"
+    name = _current_name(puzzle_path)
+    if name:
+        puzzle_data.setdefault("metadata", {})["name"] = name
     write_json_atomic(puzzle_path, puzzle_data, indent=2)
 
     cost_summary = tracker.summary()

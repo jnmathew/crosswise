@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from crosswise.api import server
 from crosswise.api.models import SessionStatus
+from crosswise.api.rate_limit import limiter
 from crosswise.api.session_manager import SessionManager
 
 
@@ -29,6 +30,7 @@ def client(tmp_path):
     server.SESSIONS_DIR = sessions_dir
     server.PUZZLES_DIR = puzzles_dir
     server.session_mgr = mgr
+    limiter.reset()
 
     yield TestClient(server.app)
 
@@ -338,3 +340,109 @@ class TestEventLoopNotBlocked:
             assert time.monotonic() - started < 0.5  # not stuck behind the 1s OCR
             assert not mask.done()
             assert (await mask).status_code == 200
+
+
+class TestDeletePuzzle:
+    def test_refused_while_solving(self, client, tmp_path):
+        session_id = _create_session(tmp_path)
+        _write_puzzle(tmp_path, session_id, {"metadata": {}, "grid": {}, "clues": {}})
+        server.cancel_events[session_id] = threading.Event()
+        try:
+            assert client.delete(f"/api/puzzles/{session_id}").status_code == 409
+            assert (tmp_path / "puzzles" / f"{session_id}.json").exists()
+        finally:
+            server.cancel_events.pop(session_id, None)
+
+    def test_removes_session_dir(self, client, tmp_path):
+        session_id = _create_session(tmp_path)
+        _write_puzzle(tmp_path, session_id, {"metadata": {}, "grid": {}, "clues": {}})
+        assert client.delete(f"/api/puzzles/{session_id}").status_code == 200
+        assert not (tmp_path / "sessions" / session_id).exists()
+
+    def test_puzzle_without_session(self, client, tmp_path):
+        _write_puzzle(tmp_path, "sample", {"metadata": {}, "grid": {}, "clues": {}})
+        assert client.delete("/api/puzzles/sample").status_code == 200
+
+
+class TestInterruptedSessions:
+    def test_running_sessions_marked_failed(self, tmp_path):
+        mgr = SessionManager(tmp_path / "s")
+        running = mgr.create_session(); mgr.update_status(running, SessionStatus.SOLVING)
+        done = mgr.create_session(); mgr.update_status(done, SessionStatus.COMPLETE)
+        assert mgr.mark_interrupted() == [running]
+        assert mgr.get_status(running) == SessionStatus.FAILED
+        assert mgr.get_status(done) == SessionStatus.COMPLETE
+
+
+class TestRenameDuringSolve:
+    def test_final_write_keeps_latest_name(self, tmp_path):
+        """A rename made while the solve runs survives the solve's final save."""
+        from crosswise.api import pipeline
+        puzzles_dir, session_dir = tmp_path / "p", tmp_path / "s"
+        puzzles_dir.mkdir(); session_dir.mkdir()
+        cells = [[{"row": r, "col": c, "is_block": (r, c) == (1, 1)} for c in range(3)] for r in range(3)]
+        puzzle = {"metadata": {"name": "Old name"}, "grid": {"rows": 3, "cols": 3, "cells": cells},
+                  "clues": {"across": [{"number": 1, "text": "Feline pet", "start": [0, 0], "length": 3}],
+                            "down": []}}
+        path = puzzles_dir / "x.json"
+        path.write_text(json.dumps(puzzle))
+
+        def rename_mid_solve(puzzle_data, *args):
+            data = json.loads(path.read_text()); data["metadata"]["name"] = "New name"
+            path.write_text(json.dumps(data))
+            return []
+
+        class Sessions:
+            def update_status(self, *a, **k): pass
+
+        with patch.object(pipeline, "_generate_candidates",
+                          return_value=({}, {}, {}, {}, {}, {}, None, {})), \
+             patch.object(pipeline, "_run_solver", return_value=({"1-across": "CAT"}, 1)), \
+             patch.object(pipeline, "_save_diagnostics"), \
+             patch.object(pipeline, "_generate_and_apply_hints", side_effect=rename_mid_solve):
+            pipeline._run_solve(session_dir, puzzles_dir, "x", lambda p: None, Sessions(), "x")
+        assert json.loads(path.read_text())["metadata"]["name"] == "New name"
+
+
+class TestRateLimit:
+    def test_limiter_window(self):
+        from crosswise.api.rate_limit import RateLimiter
+        now = [0.0]
+        lim = RateLimiter(clock=lambda: now[0])
+        rule = [("k", 2, 60.0)]
+        assert lim.acquire(rule) is None and lim.acquire(rule) is None
+        assert lim.acquire(rule) == pytest.approx(60.0)
+        now[0] = 61.0
+        assert lim.acquire(rule) is None
+
+    def test_rejected_request_uses_no_quota(self):
+        from crosswise.api.rate_limit import RateLimiter
+        lim = RateLimiter(clock=lambda: 0.0)
+        assert lim.acquire([("a", 5, 60), ("b", 1, 60)]) is None
+        assert lim.acquire([("a", 5, 60), ("b", 1, 60)]) is not None  # b is full
+        assert len(lim._hits["a"]) == 1
+
+    def test_solve_endpoint_returns_429(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(server.settings, "RATE_LIMIT_SOLVES_PER_HOUR", 1)
+        session_id = _create_session(tmp_path)
+        assert client.post(f"/api/{session_id}/solve").status_code == 404  # no puzzle; uses the slot
+        resp = client.post(f"/api/{session_id}/solve")
+        assert resp.status_code == 429 and "Retry-After" in resp.headers
+
+    def test_disabled(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(server.settings, "RATE_LIMIT_ENABLED", False)
+        monkeypatch.setattr(server.settings, "RATE_LIMIT_SOLVES_PER_HOUR", 0)
+        session_id = _create_session(tmp_path)
+        assert client.post(f"/api/{session_id}/solve").status_code == 404
+
+
+class TestUploadLimits:
+    def test_too_large(self, client, monkeypatch):
+        monkeypatch.setattr(server.settings, "MAX_UPLOAD_MB", 1)
+        big = b"\x89PNG\r\n\x1a\n" + b"0" * (1024 * 1024 + 10)
+        resp = client.post("/api/upload", files={"file": ("big.png", big, "image/png")})
+        assert resp.status_code == 413
+
+    def test_not_really_an_image(self, client):
+        resp = client.post("/api/upload", files={"file": ("x.png", b"hello world", "image/png")})
+        assert resp.status_code == 400

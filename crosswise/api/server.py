@@ -1,13 +1,15 @@
 """FastAPI server for the Crosswise crossword puzzle app."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
+import shutil
 import threading
 from functools import partial
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -29,8 +31,10 @@ from crosswise.api.models import (
     ManualCropRequest,
 )
 from crosswise.api.session_manager import SessionManager, SessionNotFound
+from crosswise.api.rate_limit import rate_limited
 from crosswise.api.storage import write_json_atomic
 from crosswise.api import pipeline
+from crosswise.vision.grid_detection import MAX_GRID_DIM, MIN_GRID_DIM
 
 SESSIONS_DIR = settings.DATA_DIR / "sessions"
 PUZZLES_DIR = settings.PROJECT_ROOT / "web" / "public" / "puzzles"
@@ -83,7 +87,16 @@ def _start_tracked(session_id: str, background_tasks: BackgroundTasks, make_task
     )
 
 
-app = FastAPI(title="Crosswise API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Solve tracking is in memory, so anything still "running" at startup was
+    # killed by the restart (including uvicorn --reload on a code change).
+    for session_id in session_mgr.mark_interrupted():
+        logger.warning(f"Session {session_id} was interrupted by a server restart; marked failed")
+    yield
+
+
+app = FastAPI(title="Crosswise API", version="0.1.0", lifespan=lifespan)
 
 
 @app.exception_handler(SessionNotFound)
@@ -107,17 +120,39 @@ async def get_config():
     return {"ocr_provider": settings.OCR_PROVIDER}
 
 
-@app.post("/api/upload", response_model=UploadResponse)
+# Leading bytes of the image formats OpenCV decodes here
+_IMAGE_SIGNATURES = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")
+
+
+def _check_upload_size(request: Request) -> None:
+    """Reject oversized uploads from Content-Length before the body is parsed."""
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > settings.MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, f"Image must be under {settings.MAX_UPLOAD_MB} MB")
+
+
+@app.post(
+    "/api/upload", response_model=UploadResponse,
+    dependencies=[Depends(_check_upload_size), Depends(rate_limited("upload"))],
+)
 async def upload_photo(file: UploadFile):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(400, "File must be an image (JPEG or PNG)")
+
+    # Content-Length can be absent (chunked uploads), so enforce the cap on
+    # the bytes actually read too.
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    content = await file.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise HTTPException(413, f"Image must be under {settings.MAX_UPLOAD_MB} MB")
+    if not content.startswith(_IMAGE_SIGNATURES):
+        raise HTTPException(400, "File must be a JPEG or PNG image")
 
     session_id = session_mgr.create_session()
     session_dir = session_mgr.get_session_dir(session_id)
 
     # Save uploaded file
     original_path = session_dir / "original.jpg"
-    content = await file.read()
     with open(original_path, "wb") as f:
         f.write(content)
 
@@ -164,8 +199,8 @@ async def edit_grid(session_id: str, edit: GridEditRequest):
 @app.post("/api/{session_id}/resize-grid", response_model=GridResizeResponse)
 async def resize_grid(session_id: str, req: GridResizeRequest):
     session_dir = session_mgr.get_session_dir(session_id)
-    if req.rows < 3 or req.rows > 30 or req.cols < 3 or req.cols > 30:
-        raise HTTPException(400, "Rows and cols must be between 3 and 30")
+    if not (MIN_GRID_DIM <= req.rows <= MAX_GRID_DIM and MIN_GRID_DIM <= req.cols <= MAX_GRID_DIM):
+        raise HTTPException(400, f"Rows and cols must be between {MIN_GRID_DIM} and {MAX_GRID_DIM}")
     try:
         result = await run_in_threadpool(pipeline.resize_grid, session_dir, req.rows, req.cols)
     except Exception as e:
@@ -178,7 +213,8 @@ async def resize_grid(session_id: str, req: GridResizeRequest):
     )
 
 
-@app.post("/api/{session_id}/manual-crop", response_model=UploadResponse)
+@app.post("/api/{session_id}/manual-crop", response_model=UploadResponse,
+          dependencies=[Depends(rate_limited("upload"))])
 async def manual_crop(session_id: str, req: ManualCropRequest):
     """Re-run grid detection with user-specified quad corners."""
     session_dir = session_mgr.get_session_dir(session_id)
@@ -212,7 +248,8 @@ async def manual_crop(session_id: str, req: ManualCropRequest):
     )
 
 
-@app.post("/api/{session_id}/mask", response_model=MaskResponse)
+@app.post("/api/{session_id}/mask", response_model=MaskResponse,
+          dependencies=[Depends(rate_limited("solve"))])
 async def submit_mask(session_id: str, mask: MaskRequest, background_tasks: BackgroundTasks):
     session_dir = session_mgr.get_session_dir(session_id)
     if session_id in cancel_events:
@@ -261,7 +298,8 @@ async def submit_mask(session_id: str, mask: MaskRequest, background_tasks: Back
     )
 
 
-@app.post("/api/{session_id}/start-pipeline", response_model=StartPipelineResponse)
+@app.post("/api/{session_id}/start-pipeline", response_model=StartPipelineResponse,
+          dependencies=[Depends(rate_limited("solve"))])
 async def start_pipeline(session_id: str, mask: MaskRequest, background_tasks: BackgroundTasks):
     """Start the full OCR + solve pipeline in the background.
 
@@ -292,7 +330,7 @@ async def start_pipeline(session_id: str, mask: MaskRequest, background_tasks: B
     )
 
 
-@app.post("/api/{session_id}/solve")
+@app.post("/api/{session_id}/solve", dependencies=[Depends(rate_limited("solve"))])
 async def retrigger_solve(session_id: str, background_tasks: BackgroundTasks):
     """Re-trigger the solve for an existing session (e.g., after pipeline fix)."""
     session_dir = session_mgr.get_session_dir(session_id)
@@ -432,9 +470,18 @@ async def update_puzzle(puzzle_id: str, body: dict):
 
 @app.delete("/api/puzzles/{puzzle_id}")
 async def delete_puzzle(puzzle_id: str):
-    """Delete a puzzle JSON file."""
+    """Delete a puzzle and its session data."""
     puzzle_path = _puzzle_path(puzzle_id)
+    if puzzle_id in cancel_events:
+        # The solve's final write would recreate the file
+        raise HTTPException(409, "This puzzle is still solving; cancel the solve first")
     puzzle_path.unlink()
+    try:
+        # Puzzle IDs are session IDs; without this, session dirs (photos,
+        # OCR output, diagnostics) accumulate forever.
+        shutil.rmtree(session_mgr.get_session_dir(puzzle_id))
+    except SessionNotFound:
+        pass  # e.g. the demo puzzle, which has no session
     return {"ok": True}
 
 

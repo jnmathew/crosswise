@@ -17,6 +17,11 @@ from crosswise.config import Settings
 from crosswise.models import Cell
 
 
+# Plausible crossword sizes (also the bounds for manual resizing in the API)
+MIN_GRID_DIM = 3
+MAX_GRID_DIM = 30
+
+
 def _smooth1d(arr: np.ndarray, k: int) -> np.ndarray:
     """Smooth 1D array with moving average filter."""
     k = max(1, int(k))
@@ -403,7 +408,7 @@ def _detect_grid_lines_by_projection(warped_gray: np.ndarray) -> Tuple[List[int]
     return xs, ys
 
 
-def _detect_grid_intersections(warped_gray: np.ndarray) -> List[Tuple[float, float]]:
+def _detect_grid_intersections(warped_gray: np.ndarray) -> Tuple[List[int], List[int]]:
     """
     Detect grid line intersections (fallback method).
 
@@ -414,7 +419,9 @@ def _detect_grid_intersections(warped_gray: np.ndarray) -> List[Tuple[float, flo
         warped_gray: Grayscale warped grid image
 
     Returns:
-        List of (x, y) intersection points in row-major order
+        (xs, ys): one x position per grid column line and one y position per
+        row line, i.e. the column/row structure of the clustered intersections.
+        Empty lists if no grid was found.
     """
     # Adaptive threshold to emphasise lines
     th = cv2.adaptiveThreshold(warped_gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 8)
@@ -446,7 +453,7 @@ def _detect_grid_intersections(warped_gray: np.ndarray) -> List[Tuple[float, flo
         centers.append((cx, cy))
 
     if not centers:
-        return []
+        return [], []
 
     # Sort centers into a grid by clustering y and x
     pts = np.array(centers)
@@ -463,7 +470,7 @@ def _detect_grid_intersections(warped_gray: np.ndarray) -> List[Tuple[float, flo
     y_spacing = median_spacing(ys)
     x_spacing = median_spacing(xs)
     if y_spacing is None or x_spacing is None:
-        return []
+        return [], []
 
     y_tol = max(4.0, float(y_spacing) * 0.4)
 
@@ -489,7 +496,7 @@ def _detect_grid_intersections(warped_gray: np.ndarray) -> List[Tuple[float, flo
     # Verify roughly rectangular grid: consistent number of cols
     counts = [len(r) for r in grid]
     if not counts:
-        return []
+        return [], []
     col_count = max(set(counts), key=counts.count)
 
     # Filter rows that don't match majority column count
@@ -511,13 +518,12 @@ def _detect_grid_intersections(warped_gray: np.ndarray) -> List[Tuple[float, flo
                 chosen.append(r[idx])
             final_grid.append(chosen)
 
-    # Flatten into intersection points in row-major order
-    intersections = []
-    for r in final_grid:
-        for p in r:
-            intersections.append((float(p[0]), float(p[1])))
-
-    return intersections
+    # One line position per row and per column. Points along a line jitter by a
+    # few pixels, so take the median rather than every distinct coordinate
+    # (which turned one column into dozens of "lines").
+    ys = [int(round(np.median([p[1] for p in row]))) for row in final_grid]
+    xs = [int(round(np.median([row[i][0] for row in final_grid]))) for i in range(col_count)]
+    return xs, ys
 
 
 def classify_black_cells(warped_gray: np.ndarray, xs: List[int], ys: List[int]) -> List[List[Cell]]:
@@ -672,14 +678,9 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
     if len(xs) < 2 or len(ys) < 2:
         logger.warning(f"Projection method found insufficient lines ({len(xs)} cols, {len(ys)} rows), trying fallback")
         # Fallback to intersection method
-        intersections = _detect_grid_intersections(warped_gray)
-        if not intersections:
+        xs, ys = _detect_grid_intersections(warped_gray)
+        if not xs or not ys:
             raise ValueError("Grid detection failed: no intersections found")
-
-        # Extract xs and ys from intersections
-        pts = np.array(intersections)
-        xs = sorted(list(set(np.round(pts[:, 0]).astype(int))))
-        ys = sorted(list(set(np.round(pts[:, 1]).astype(int))))
         method = "intersection"
 
     if len(xs) < 2 or len(ys) < 2:
@@ -687,6 +688,12 @@ def detect_grid(warped_gray: np.ndarray, config: Settings) -> Dict[str, Any]:
 
     num_cols = len(xs) - 1
     num_rows = len(ys) - 1
+    # Same bounds as manual resizing; anything outside is a misdetection
+    if not (MIN_GRID_DIM <= num_rows <= MAX_GRID_DIM and MIN_GRID_DIM <= num_cols <= MAX_GRID_DIM):
+        raise ValueError(
+            f"Grid detection found an implausible {num_rows}x{num_cols} grid; "
+            "try cropping the grid manually"
+        )
 
     logger.info(f"Grid detected: {num_rows} rows × {num_cols} cols (method: {method})")
 

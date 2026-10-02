@@ -12,7 +12,7 @@ And two backtracking strategies:
 
 import time
 from collections import deque
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Callable, Dict, List, Tuple, Optional, Set
 from loguru import logger
 from crosswise.solver.models import SolverInput, SolveResult
 
@@ -21,6 +21,10 @@ from crosswise.solver.models import SolverInput, SolveResult
 ClueId = str
 Word = str
 CellPos = Tuple[int, int]
+
+
+class _SearchStopped(Exception):
+    """Raised inside backtracking when the time limit passes or a stop is requested."""
 
 
 class CSPSolver:
@@ -42,8 +46,18 @@ class CSPSolver:
         use_cdbj: bool = True,
         candidate_scores: Optional[Dict[ClueId, Dict[Word, float]]] = None,
         mac_mode: str = "full",
+        time_limit_s: Optional[float] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+        locked: Optional[Dict[ClueId, Word]] = None,
     ):
         self.solver_input = solver_input
+        # Answers placed before any search (greedy and every restart); their
+        # domains are also pinned to that one word by solve_csp().
+        self.locked: Dict[ClueId, Word] = dict(locked or {})
+        # Backtracking is exponential in the worst case; the deadline and
+        # should_stop (e.g. a cancel button) bound it. Greedy is polynomial.
+        self._deadline = time.monotonic() + time_limit_s if time_limit_s else None
+        self._should_stop = should_stop
         self.clue_cells = solver_input.clue_cells
         self.cell_to_clues = solver_input.cell_to_clues
         # mac_mode: "full" (AC-3 preprocessing + MAC), "search-only" (MAC during search, no AC-3 preprocessing), "off" (forward checking)
@@ -82,6 +96,12 @@ class CSPSolver:
         self.prune_operations = 0
         self.domain_wipeouts = 0
         self.ac3_pruned = 0
+
+    def _check_stop(self) -> None:
+        if (self._deadline is not None and time.monotonic() > self._deadline) or (
+            self._should_stop is not None and self._should_stop()
+        ):
+            raise _SearchStopped()
 
     def _precompute_crossings(self) -> Dict[ClueId, List[Tuple[ClueId, int, int]]]:
         """
@@ -393,7 +413,7 @@ class CSPSolver:
         # Get all assignable clues sorted by domain size (smallest first — forced moves first)
         candidates = []
         for clue_id in self.clue_cells:
-            if clue_id in self.initially_empty:
+            if clue_id in self.initially_empty or clue_id in self.locked:
                 continue
             size = len(self.domains[clue_id])
             if size > 0:
@@ -411,10 +431,20 @@ class CSPSolver:
             if self.use_mac and self.mac_mode == "full":
                 if not self._ac3():
                     continue  # Inconsistent from this starting config
-            if self.use_cdbj:
-                result, _ = self._backtrack_cdbj(start_clue, {}, 0)
-            else:
-                result = self._backtrack_from(start_clue, {}, 0)
+            start = self._place_locked()
+            if any(not self.domains[c] for c in self.clue_cells
+                   if c not in start and c not in self.initially_empty):
+                # A locked answer leaves some clue with no fitting candidate,
+                # so no full solution exists; greedy's partial is the result.
+                return None
+            try:
+                if self.use_cdbj:
+                    result, _ = self._backtrack_cdbj(start_clue, start, 0)
+                else:
+                    result = self._backtrack_from(start_clue, start, 0)
+            except _SearchStopped:
+                logger.info(f"CSP search stopped (time limit or cancel); best partial: {len(self.best_partial)} clues")
+                return None
             if result is not None:
                 return result
             # Track that this start didn't work
@@ -433,6 +463,7 @@ class CSPSolver:
         self, forced_start: Optional[ClueId], assignment: Dict[ClueId, Word], depth: int
     ) -> Optional[Dict[ClueId, Word]]:
         """Backtracking with optional forced starting clue (chronological)."""
+        self._check_stop()
         self.max_depth = max(self.max_depth, depth)
 
         if len(assignment) > len(self.best_partial):
@@ -487,6 +518,7 @@ class CSPSolver:
             conflict set that caused failure (for the caller to decide
             whether to continue or backjump).
         """
+        self._check_stop()
         self.max_depth = max(self.max_depth, depth)
 
         if len(assignment) > len(self.best_partial):
@@ -568,7 +600,7 @@ class CSPSolver:
         Repeat until no more progress.
         """
         start_time = time.perf_counter()
-        assignment: Dict[ClueId, Word] = {}
+        assignment: Dict[ClueId, Word] = self._place_locked()
 
         # Phase 1: Assign all forced moves (domain size == 1) first
         # These propagate constraints and may create new forced moves
@@ -627,6 +659,23 @@ class CSPSolver:
             arc_consistency_pruned=self.ac3_pruned,
             backjumps=0,
         )
+
+    def _place_locked(self) -> Dict[ClueId, Word]:
+        """Assign every locked answer and prune crossing domains to match.
+
+        Unlike _apply_seed, a locked answer is never dropped: if it leaves a
+        crossing clue with no fitting candidate, that clue's domain goes empty
+        (it stays unfilled) instead of the locked answer being undone.
+        """
+        assignment = dict(self.locked)
+        for clue_id, word in self.locked.items():
+            for other_id, self_pos, other_pos in self.crossings[clue_id]:
+                if other_id in assignment or other_id in self.initially_empty:
+                    continue
+                self.domains[other_id] = {
+                    w for w in self.domains[other_id] if w[other_pos] == word[self_pos]
+                }
+        return assignment
 
     def _apply_seed(self, seed: Dict[ClueId, Word]) -> Dict[ClueId, Word]:
         """
@@ -758,6 +807,9 @@ def solve_csp(
     candidate_scores: Optional[Dict[ClueId, Dict[Word, float]]] = None,
     seed_assignment: Optional[Dict[ClueId, Word]] = None,
     mac_mode: str = "full",
+    locked: Optional[Dict[ClueId, Word]] = None,
+    time_limit_s: Optional[float] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> SolveResult:
     """
     Solve a crossword puzzle using CSP.
@@ -771,15 +823,27 @@ def solve_csp(
         candidate_scores: Optional score map for value ordering (clue_id -> {word: score})
         seed_assignment: Optional partial assignment from previous pass to build on
         mac_mode: "full" (AC-3 + MAC), "search-only" (MAC during search only), "off" (FC only)
+        locked: Answers that must be kept. Each locked clue's domain becomes
+            exactly its answer (even if the word isn't among its candidates),
+            so every result, full or partial, builds around them. Unlike
+            seed_assignment, which only warm-starts the best partial: greedy
+            and backtracking still start from an empty grid and may return a
+            different fill.
+        time_limit_s / should_stop: bound the backtracking search.
 
     Returns:
         SolveResult with solution and statistics.
     """
+    if locked:
+        candidates_by_clue = {**candidates_by_clue, **{cid: [w] for cid, w in locked.items()}}
     solver = CSPSolver(
         solver_input, candidates_by_clue,
         use_mac=use_mac, use_cdbj=use_cdbj,
         candidate_scores=candidate_scores,
         mac_mode=mac_mode,
+        time_limit_s=time_limit_s,
+        should_stop=should_stop,
+        locked=locked,
     )
     return solver.solve(return_partial=return_partial, seed_assignment=seed_assignment)
 

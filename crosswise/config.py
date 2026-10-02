@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     # decides it needs to, targeting only clues still unsolved by then.
     SOLVER_WEB_SEARCH: bool = True
 
+    # Abuse limits (in-memory, per server process; see crosswise/api/rate_limit.py)
+    MAX_UPLOAD_MB: int = 20
+    RATE_LIMIT_ENABLED: bool = True
+    # "solve" = /start-pipeline, /mask, /solve: each spends OCR and/or Claude calls
+    RATE_LIMIT_SOLVES_PER_HOUR: int = 20  # per client IP
+    RATE_LIMIT_SOLVES_PER_DAY: int = 200  # all clients combined
+    # "upload" = /upload, /manual-crop: grid detection CPU and disk
+    RATE_LIMIT_UPLOADS_PER_HOUR: int = 60  # per client IP
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # or "text"

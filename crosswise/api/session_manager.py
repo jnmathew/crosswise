@@ -44,6 +44,25 @@ class SessionManager:
         data.update(extra)
         self._write_session(session_id, data)
 
+    def mark_interrupted(self) -> list[str]:
+        """Mark sessions left in a running state as failed. Returns their IDs.
+
+        Call at startup only: solve tracking lives in memory, so any session
+        still OCR-ing, solving, or generating hints then has no worker.
+        """
+        running = {SessionStatus.OCR_RUNNING, SessionStatus.SOLVING, SessionStatus.GENERATING_HINTS}
+        interrupted = []
+        for path in self.base_dir.glob("*/session.json"):
+            session_id = path.parent.name
+            try:
+                if self.get_status(session_id) in running:
+                    self.update_status(session_id, SessionStatus.FAILED,
+                                       error="Interrupted by a server restart")
+                    interrupted.append(session_id)
+            except (OSError, ValueError, KeyError):
+                continue  # unreadable session file; leave it alone
+        return interrupted
+
     def get_status(self, session_id: str) -> SessionStatus:
         data = self._read_session(session_id)
         return SessionStatus(data["status"])

@@ -116,7 +116,9 @@ These short words appear in almost every crossword. When a clue is ambiguous and
 - SKIP (<70%): Wordplay clues without crossing help, ambiguous short clues with multiple valid synonyms, any answer that would put unlikely letters in crossing positions
 
 ## Web Search
-You have access to web search. Use it ONLY when you are unsure about:
+Some requests include a web search tool; most don't. If you have no web search tool, rely on
+your own knowledge, and skip a clue you can't verify rather than guess. When the tool is
+available, use it ONLY when you are unsure about:
 - Proper nouns: "Actress — Gabor", "— Moines, Iowa", names you can't verify from memory
 - Factual clues where you have multiple plausible candidates
 - Clues where your answer would put rare letters (Z, Q, X, J) in crossing positions
@@ -342,30 +344,10 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
         # Cut off before the answer: a failed pass, not "nothing to commit",
         # so the caller moves on to the next pass instead of stopping.
         return None
-    text = response_text(response, f"solve_pass_{pass_num}")
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        if "```" in text:
-            text = text[:text.rfind("```")]
-        text = text.strip()
-
-    # Try to extract JSON from the response (may have surrounding text)
-    try:
-        new_answers = json.loads(text)
-    except json.JSONDecodeError:
-        # Find the JSON object in surrounding text. Take the last one that
-        # parses: with web search, narration precedes the final answer.
-        new_answers = None
-        for candidate in reversed(re.findall(r'\{[^{}]*\}', text)):
-            try:
-                new_answers = json.loads(candidate)
-                break
-            except json.JSONDecodeError:
-                continue
-        if new_answers is None:
-            logger.warning("No parseable JSON found in LLM response")
-            return None
+    new_answers = _parse_answer_json(response_text(response, f"solve_pass_{pass_num}"))
+    if new_answers is None:
+        logger.warning("No parseable JSON found in LLM response")
+        return None
 
     # Validate: correct length, matches pattern, and is in candidates (if we have them)
     validated: Dict[ClueId, Word] = {}
@@ -662,27 +644,10 @@ Return ONLY the JSON object."""
         return None  # None signals API error
 
     # Extract text from mixed content blocks
-    text = response_text(response, "conflict_resolution")
-
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        if "```" in text:
-            text = text[:text.rfind("```")]
-        text = text.strip()
-
-    try:
-        new_answers = json.loads(text)
-    except json.JSONDecodeError:
-        json_match = re.search(r'\{[^{}]*\}', text)
-        if json_match:
-            try:
-                new_answers = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                logger.warning("Could not parse conflict resolution response")
-                return {}
-        else:
-            logger.warning("No JSON found in conflict resolution response")
-            return {}
+    new_answers = _parse_answer_json(response_text(response, "conflict_resolution"))
+    if new_answers is None:
+        logger.warning("No parseable JSON found in conflict resolution response")
+        return {}
 
     # Validate lengths
     validated: Dict[ClueId, Word] = {}
@@ -724,22 +689,32 @@ def _parse_answer_json(text: str) -> Optional[Dict[str, str]]:
     """Parse a clue_id -> answer JSON object from model text.
 
     Strips markdown fences, then falls back to the last flat JSON object in
-    the text (narration around web searches can precede the answer).
+    the text (narration around web searches can precede the answer). Only a
+    JSON *object* counts, and entries whose answer isn't a string are dropped,
+    so a malformed reply can't crash the caller. Returns None if nothing parses.
     """
+    def as_answers(raw: str) -> Optional[Dict[str, str]]:
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        return {k: v for k, v in obj.items() if isinstance(v, str)}
+
+    text = text.strip()
     if text.startswith("```"):
-        text = text.split("\n", 1)[1]
+        text = text.split("\n", 1)[1] if "\n" in text else ""
         if "```" in text:
             text = text[:text.rfind("```")]
         text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    parsed = as_answers(text)
+    if parsed is not None:
+        return parsed
     for candidate in reversed(re.findall(r'\{[^{}]*\}', text)):
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
+        parsed = as_answers(candidate)
+        if parsed is not None:
+            return parsed
     return None
 
 
@@ -901,7 +876,7 @@ Return ONLY a JSON object mapping clue_id to answer."""
     new_answers = _parse_answer_json(response_text(response, "verify_resolve")) or {}
     trial = dict(kept)
     for cid, word in new_answers.items():
-        if cid not in cleared or not isinstance(word, str):
+        if cid not in cleared:
             continue
         word = word.upper()
         if _matches_pattern(word, patterns.get(cid, "_" * solver_input.clue_length(cid))):
@@ -1024,14 +999,18 @@ def _dictionary_and_llm_confirm(word: str, clue_text: str) -> bool:
     """Verify a fully-constrained word fits the clue using dictionary + Sonnet.
 
     1. Fetch dictionary definitions (free API)
-    2. Quick word-overlap check — if clue word appears in definition, accept
+    2. Quick word-overlap check — if a clue word appears in the definition as
+       a whole word, accept
     3. Otherwise, ask Sonnet with the definition text: "does this word fit this clue?"
 
-    Returns True on network failures (benefit of the doubt).
+    Fails closed: returns False whenever it can't verify (no clue text, no API
+    key, network or API error). Callers commit the word only on True, and an
+    uncommitted clue is still solved later, while a wrong commit poisons its
+    crossings.
     """
 
     if not clue_text:
-        return True
+        return False
 
     # Step 1: Get dictionary definitions
     def_text = _get_dictionary_definitions(word)
@@ -1051,16 +1030,17 @@ def _dictionary_and_llm_confirm(word: str, clue_text: str) -> bool:
                 clue_words.add(cleaned)
 
         if clue_words:
-            def_lower = def_text.lower()
+            # Whole words only: a substring test let "art" match "start"
+            def_words = set(re.findall(r"[a-z']+", def_text.lower()))
             for cw in clue_words:
-                if cw in def_lower:
+                if cw in def_words:
                     logger.debug(f"Dictionary match: '{cw}' found in definition of {word}")
                     return True
 
     # Step 3: Ask Sonnet — is this word a valid answer for this clue?
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return True  # Can't verify, allow it
+        return False  # Can't verify
 
     try:
         import anthropic
@@ -1092,8 +1072,9 @@ def _dictionary_and_llm_confirm(word: str, clue_text: str) -> bool:
         logger.debug(f"Sonnet verification: {word} for \"{clue_text}\" → {confirmed}")
         return confirmed
 
-    except Exception:
-        return True  # Network error — allow it
+    except Exception as e:
+        logger.warning(f"Forced-word check for {word} failed ({e}); not committing it")
+        return False
 
 
 def propagate_constraints(
