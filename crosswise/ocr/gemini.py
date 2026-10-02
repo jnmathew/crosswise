@@ -44,7 +44,9 @@ class GeminiOCRProvider:
         mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
         mime_type = mime_map.get(suffix, "image/jpeg")
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        # Key goes in a header, not the query string: HTTPError messages embed
+        # the URL, and those messages reach session.json and the SSE stream.
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         payload = {
             "contents": [{"parts": [
                 {"inline_data": {"mime_type": mime_type, "data": img_b64}},
@@ -52,7 +54,9 @@ class GeminiOCRProvider:
             ]}],
             "generationConfig": {"temperature": 0},
         }
-        resp = requests.post(url, json=payload, timeout=120)
+        resp = requests.post(
+            url, json=payload, headers={"x-goog-api-key": self.api_key}, timeout=120
+        )
         resp.raise_for_status()
 
         raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
