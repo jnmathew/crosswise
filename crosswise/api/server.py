@@ -3,13 +3,16 @@
 import asyncio
 import json
 import threading
+from functools import partial
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from loguru import logger
 
 from crosswise.config import settings
 from crosswise.api.models import (
@@ -25,7 +28,8 @@ from crosswise.api.models import (
     GridResizeResponse,
     ManualCropRequest,
 )
-from crosswise.api.session_manager import SessionManager
+from crosswise.api.session_manager import SessionManager, SessionNotFound
+from crosswise.api.storage import write_json_atomic
 from crosswise.api import pipeline
 
 SESSIONS_DIR = settings.DATA_DIR / "sessions"
@@ -38,8 +42,8 @@ progress_queues: dict[str, asyncio.Queue] = {}
 cancel_events: dict[str, threading.Event] = {}
 
 
-def _run_tracked(task_fn, session_id: str, queue: asyncio.Queue,
-                 cancel_event: threading.Event, /, *args, **kwargs):
+def _run_tracked(task, session_id: str, queue: asyncio.Queue,
+                 cancel_event: threading.Event):
     """Run a background pipeline task, then drop its progress-tracking entries.
 
     Cleanup must happen on the producer side: if no SSE consumer ever drains
@@ -50,14 +54,41 @@ def _run_tracked(task_fn, session_id: str, queue: asyncio.Queue,
     entries of a newer solve that re-registered under the same session_id.
     """
     try:
-        task_fn(*args, **kwargs)
+        task()
     finally:
         if progress_queues.get(session_id) is queue:
             progress_queues.pop(session_id, None)
         if cancel_events.get(session_id) is cancel_event:
             cancel_events.pop(session_id, None)
 
+
+
+def _start_tracked(session_id: str, background_tasks: BackgroundTasks, make_task):
+    """Register progress tracking for a session and schedule its background task.
+
+    ``make_task(queue, cancel_event, loop)`` returns the zero-arg callable to run.
+    Refuses (409) while a solve is already active for the session: two solves
+    would race to write the same puzzle JSON. The check and the registration
+    both run on the event loop thread, so they can't interleave.
+    """
+    if session_id in cancel_events:
+        raise HTTPException(409, "A solve is already running for this puzzle")
+    queue: asyncio.Queue = asyncio.Queue()
+    cancel_event = threading.Event()
+    loop = asyncio.get_running_loop()
+    progress_queues[session_id] = queue
+    cancel_events[session_id] = cancel_event
+    background_tasks.add_task(
+        _run_tracked, make_task(queue, cancel_event, loop), session_id, queue, cancel_event,
+    )
+
+
 app = FastAPI(title="Crosswise API", version="0.1.0")
+
+
+@app.exception_handler(SessionNotFound)
+async def session_not_found(request: Request, exc: SessionNotFound):
+    return JSONResponse(status_code=404, content={"detail": "Session not found"})
 
 app.add_middleware(
     CORSMiddleware,
@@ -90,8 +121,10 @@ async def upload_photo(file: UploadFile):
     with open(original_path, "wb") as f:
         f.write(content)
 
+    # Grid detection is seconds of CPU work; run it in a worker thread so it
+    # doesn't stall the event loop (and every live progress stream).
     try:
-        result = pipeline.run_grid_detection(session_dir, settings)
+        result = await run_in_threadpool(pipeline.run_grid_detection, session_dir, settings)
     except Exception as e:
         session_mgr.update_status(session_id, SessionStatus.FAILED, error=str(e))
         raise HTTPException(422, f"Grid detection failed: {e}")
@@ -134,7 +167,7 @@ async def resize_grid(session_id: str, req: GridResizeRequest):
     if req.rows < 3 or req.rows > 30 or req.cols < 3 or req.cols > 30:
         raise HTTPException(400, "Rows and cols must be between 3 and 30")
     try:
-        result = pipeline.resize_grid(session_dir, req.rows, req.cols)
+        result = await run_in_threadpool(pipeline.resize_grid, session_dir, req.rows, req.cols)
     except Exception as e:
         raise HTTPException(422, f"Grid resize failed: {e}")
 
@@ -156,7 +189,9 @@ async def manual_crop(session_id: str, req: ManualCropRequest):
         raise HTTPException(400, "corners must be exactly 4 points, each [x, y]")
 
     try:
-        result = pipeline.run_grid_detection(session_dir, settings, manual_quad=req.corners)
+        result = await run_in_threadpool(
+            pipeline.run_grid_detection, session_dir, settings, manual_quad=req.corners,
+        )
     except Exception as e:
         raise HTTPException(422, f"Manual crop failed: {e}")
 
@@ -180,10 +215,14 @@ async def manual_crop(session_id: str, req: ManualCropRequest):
 @app.post("/api/{session_id}/mask", response_model=MaskResponse)
 async def submit_mask(session_id: str, mask: MaskRequest, background_tasks: BackgroundTasks):
     session_dir = session_mgr.get_session_dir(session_id)
+    if session_id in cancel_events:
+        # Checked before OCR so a rejected request doesn't spend a Gemini call
+        raise HTTPException(409, "A solve is already running for this puzzle")
     session_mgr.update_status(session_id, SessionStatus.OCR_RUNNING)
 
     try:
-        result = pipeline.run_ocr_and_verify(session_dir, mask, settings)
+        # OCR is a multi-second network call; keep it off the event loop
+        result = await run_in_threadpool(pipeline.run_ocr_and_verify, session_dir, mask, settings)
     except Exception as e:
         session_mgr.update_status(session_id, SessionStatus.FAILED, error=str(e))
         raise HTTPException(422, f"OCR/verification failed: {e}")
@@ -206,16 +245,10 @@ async def submit_mask(session_id: str, mask: MaskRequest, background_tasks: Back
     session_mgr.update_status(session_id, SessionStatus.VERIFIED, puzzle_id=puzzle_id)
 
     # Fire background solve
-    queue: asyncio.Queue = asyncio.Queue()
-    cancel_event = threading.Event()
-    loop = asyncio.get_running_loop()
-    progress_queues[session_id] = queue
-    cancel_events[session_id] = cancel_event
-    background_tasks.add_task(
-        _run_tracked, pipeline.run_solve_background, session_id, queue, cancel_event,
-        session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id,
-        cancel_event, loop,
-    )
+    _start_tracked(session_id, background_tasks, lambda queue, cancel_event, loop: partial(
+        pipeline.run_solve_background,
+        session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id, cancel_event, loop,
+    ))
 
     return MaskResponse(
         status=SessionStatus.VERIFIED,
@@ -237,21 +270,18 @@ async def start_pipeline(session_id: str, mask: MaskRequest, background_tasks: B
     """
     session_dir = session_mgr.get_session_dir(session_id)
     puzzle_id = session_id
+    if session_id in cancel_events:
+        raise HTTPException(409, "A solve is already running for this puzzle")
 
     # Build skeleton puzzle so the player has something to load immediately
     pipeline.build_skeleton_puzzle(session_dir, PUZZLES_DIR, puzzle_id)
 
     # Create progress queue and start background pipeline
-    queue: asyncio.Queue = asyncio.Queue()
-    cancel_event = threading.Event()
-    loop = asyncio.get_running_loop()
-    progress_queues[session_id] = queue
-    cancel_events[session_id] = cancel_event
-    background_tasks.add_task(
-        _run_tracked, pipeline.run_full_pipeline_background, session_id, queue, cancel_event,
+    _start_tracked(session_id, background_tasks, lambda queue, cancel_event, loop: partial(
+        pipeline.run_full_pipeline_background,
         session_dir, PUZZLES_DIR, puzzle_id, mask, settings,
         queue, session_mgr, session_id, cancel_event, loop,
-    )
+    ))
 
     session_mgr.update_status(session_id, SessionStatus.OCR_RUNNING, puzzle_id=puzzle_id)
 
@@ -271,16 +301,10 @@ async def retrigger_solve(session_id: str, background_tasks: BackgroundTasks):
     if not puzzle_path.exists():
         raise HTTPException(404, "No puzzle found for this session")
 
-    queue: asyncio.Queue = asyncio.Queue()
-    cancel_event = threading.Event()
-    loop = asyncio.get_running_loop()
-    progress_queues[session_id] = queue
-    cancel_events[session_id] = cancel_event
-    background_tasks.add_task(
-        _run_tracked, pipeline.run_solve_background, session_id, queue, cancel_event,
-        session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id,
-        cancel_event, loop,
-    )
+    _start_tracked(session_id, background_tasks, lambda queue, cancel_event, loop: partial(
+        pipeline.run_solve_background,
+        session_dir, PUZZLES_DIR, puzzle_id, queue, session_mgr, session_id, cancel_event, loop,
+    ))
 
     return {"status": "solve_started", "session_id": session_id, "puzzle_id": puzzle_id}
 
@@ -331,10 +355,7 @@ async def stream_progress(session_id: str):
 @app.get("/api/{session_id}/diagnostics")
 async def get_diagnostics(session_id: str):
     """Return per-clue solve diagnostics (candidates, sources, scores)."""
-    try:
-        session_dir = session_mgr.get_session_dir(session_id)
-    except FileNotFoundError:
-        raise HTTPException(404, "Session not found")
+    session_dir = session_mgr.get_session_dir(session_id)
     diag_path = session_dir / "solve_diagnostics.json"
     if not diag_path.exists():
         raise HTTPException(404, "No diagnostics available — solve has not run yet")
@@ -358,8 +379,13 @@ async def list_puzzles():
     PUZZLES_DIR.mkdir(parents=True, exist_ok=True)
     puzzles = []
     for p in sorted(PUZZLES_DIR.glob("*.json")):
-        with open(p) as f:
-            data = json.load(f)
+        try:
+            with open(p) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            # One damaged file shouldn't take down the whole list
+            logger.warning(f"Skipping unreadable puzzle {p.name}: {e}")
+            continue
         meta = data.get("metadata", {})
         clues = data.get("clues", {})
         across = clues.get("across", [])
@@ -400,8 +426,7 @@ async def update_puzzle(puzzle_id: str, body: dict):
         data = json.load(f)
     if "name" in body:
         data.setdefault("metadata", {})["name"] = body["name"]
-    with open(puzzle_path, "w") as f:
-        json.dump(data, f, indent=2)
+    write_json_atomic(puzzle_path, data, indent=2)
     return {"ok": True}
 
 

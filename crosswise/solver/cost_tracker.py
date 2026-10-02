@@ -11,9 +11,12 @@ Accounts for:
 - Web search per-query costs ($0.01/search)
 """
 
+import contextvars
 import threading
+from concurrent.futures import Executor, Future
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -170,20 +173,30 @@ class CostTracker:
         return "\n".join(lines)
 
 
-# Global tracker instance — reset per solve
-_tracker: Optional[CostTracker] = None
+# Per-solve tracker. A context variable rather than a global, so concurrent
+# solves (each in its own worker thread) don't overwrite each other's tracker.
+# Thread pools inside a solve must submit through submit_in_context() so their
+# workers see the solve's tracker.
+_tracker_var: ContextVar[Optional[CostTracker]] = ContextVar("cost_tracker", default=None)
+_fallback_tracker = CostTracker()  # for calls made outside any solve
 
 
 def get_tracker() -> CostTracker:
-    """Get the global cost tracker, creating one if needed."""
-    global _tracker
-    if _tracker is None:
-        _tracker = CostTracker()
-    return _tracker
+    """Get the current solve's cost tracker."""
+    return _tracker_var.get() or _fallback_tracker
 
 
 def reset_tracker() -> CostTracker:
-    """Reset and return a fresh global cost tracker."""
-    global _tracker
-    _tracker = CostTracker()
-    return _tracker
+    """Start a fresh tracker for the current solve (this thread's context)."""
+    tracker = CostTracker()
+    _tracker_var.set(tracker)
+    return tracker
+
+
+def submit_in_context(executor: Executor, fn: Callable, *args, **kwargs) -> Future:
+    """executor.submit() that runs fn in a copy of the caller's context.
+
+    Worker threads otherwise start with an empty context and would record
+    costs on the fallback tracker instead of the solve's.
+    """
+    return executor.submit(contextvars.copy_context().run, fn, *args, **kwargs)

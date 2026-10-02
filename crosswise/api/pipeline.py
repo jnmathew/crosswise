@@ -17,6 +17,8 @@ from loguru import logger
 import numpy as np
 from crosswise.config import Settings
 from crosswise.api.models import MaskRequest, SolveProgress, SessionStatus
+from crosswise.api.storage import write_json_atomic
+from crosswise.solver.cost_tracker import submit_in_context
 
 
 class SolveCancelled(Exception):
@@ -270,12 +272,10 @@ def build_preliminary_puzzle(session_dir: Path, puzzles_dir: Path, puzzle_id: st
 
     puzzles_dir.mkdir(parents=True, exist_ok=True)
     puzzle_path = puzzles_dir / f"{puzzle_id}.json"
-    with open(puzzle_path, "w") as f:
-        json.dump(puzzle, f, indent=2)
+    write_json_atomic(puzzle_path, puzzle, indent=2)
 
     # Also save to session dir for solve step
-    with open(session_dir / "puzzle.json", "w") as f:
-        json.dump(puzzle, f, indent=2)
+    write_json_atomic(session_dir / "puzzle.json", puzzle, indent=2)
 
 
 def build_skeleton_puzzle(session_dir: Path, puzzles_dir: Path, puzzle_id: str):
@@ -327,8 +327,7 @@ def build_skeleton_puzzle(session_dir: Path, puzzles_dir: Path, puzzle_id: str):
     }
 
     puzzles_dir.mkdir(parents=True, exist_ok=True)
-    with open(puzzles_dir / f"{puzzle_id}.json", "w") as f:
-        json.dump(puzzle, f, indent=2)
+    write_json_atomic(puzzles_dir / f"{puzzle_id}.json", puzzle, indent=2)
 
 
 def run_full_pipeline_background(
@@ -517,8 +516,8 @@ def _generate_candidates(clue_inputs, put_progress, _elapsed, cancel_event=None,
         return {}
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        opus_future = executor.submit(_run_opus)
-        sonnet_future = executor.submit(_run_sonnet_pad)
+        opus_future = submit_in_context(executor, _run_opus)
+        sonnet_future = submit_in_context(executor, _run_sonnet_pad)
         opus_cands = opus_future.result()
         sonnet_cands = sonnet_future.result()
 
@@ -740,7 +739,7 @@ def _generate_and_apply_hints(puzzle_data, assignment, put_progress, _elapsed):
     all_hints: List[Dict[str, str]] = []
     failed_batches = 0
     with ThreadPoolExecutor(max_workers=total_batches) as executor:
-        futures = {executor.submit(generate_hints_batch, batch): i for i, batch in enumerate(batches)}
+        futures = {submit_in_context(executor, generate_hints_batch, batch): i for i, batch in enumerate(batches)}
         for future in as_completed(futures):
             batch_num = futures[future] + 1
             try:
@@ -838,8 +837,7 @@ def _run_solve(
 
     # Save enriched puzzle
     puzzle_path = puzzles_dir / f"{puzzle_id}.json"
-    with open(puzzle_path, "w") as f:
-        json.dump(puzzle_data, f, indent=2)
+    write_json_atomic(puzzle_path, puzzle_data, indent=2)
 
     cost_summary = tracker.summary()
     _trace_global("complete", f"Done: {solved}/{total} solved, {cost_summary.splitlines()[0] if cost_summary else ''}")

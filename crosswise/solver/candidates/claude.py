@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from loguru import logger
 
+from crosswise.solver.cost_tracker import submit_in_context
 from crosswise.solver.claude_client import OPUS_MODEL, SONNET_MODEL, create_message, response_text
 
 from .models import (
@@ -164,7 +165,7 @@ Return one entry per clue, with its clue_id and its candidate answers."""
             all_candidates.update(_process_batch(batch))
     else:
         with ThreadPoolExecutor(max_workers=len(batches)) as executor:
-            futures = {executor.submit(_process_batch, batch): i for i, batch in enumerate(batches)}
+            futures = {submit_in_context(executor, _process_batch, batch): i for i, batch in enumerate(batches)}
             for future in as_completed(futures):
                 all_candidates.update(future.result())
 

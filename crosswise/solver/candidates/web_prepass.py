@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from crosswise.solver.cost_tracker import submit_in_context
 from crosswise.solver.claude_client import SONNET_MODEL, create_message
 
 from .models import ClueInput
@@ -189,7 +190,7 @@ def web_search_prepass(
             return None
 
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(_search_one, c): c for c in pop_clues}
+        futures = {submit_in_context(executor, _search_one, c): c for c in pop_clues}
         for future in as_completed(futures):
             result = future.result()
             if result:

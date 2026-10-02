@@ -1,6 +1,7 @@
 """Tests for FastAPI API endpoints."""
 
 import json
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -250,3 +251,90 @@ class TestCancel:
 
         resp = client.post(f"/api/{session_id}/cancel")
         assert resp.status_code == 404
+
+
+class TestUnknownSession:
+    """Unknown session IDs return 404, not 500."""
+
+    def test_status(self, client):
+        assert client.get("/api/nosuchsession/status").status_code == 404
+
+    def test_solve(self, client):
+        assert client.post("/api/nosuchsession/solve").status_code == 404
+
+    def test_grid_edit(self, client):
+        resp = client.post("/api/nosuchsession/grid-edit", json={"black_cells": [[False]]})
+        assert resp.status_code == 404
+
+    def test_diagnostics(self, client):
+        assert client.get("/api/nosuchsession/diagnostics").status_code == 404
+
+
+class TestConcurrentSolveGuard:
+    """A second solve on a session with one already running is refused."""
+
+    def test_solve_refused_while_active(self, client, tmp_path):
+        session_id = _create_session(tmp_path)
+        _write_puzzle(tmp_path, session_id, {"metadata": {}, "grid": {}, "clues": {}})
+        server.cancel_events[session_id] = threading.Event()
+        try:
+            resp = client.post(f"/api/{session_id}/solve")
+            assert resp.status_code == 409
+        finally:
+            server.cancel_events.pop(session_id, None)
+
+    @patch("crosswise.api.server.pipeline")
+    def test_mask_refused_before_ocr(self, mock_pipeline, client, tmp_path):
+        """The guard runs before OCR, so a refused request costs no Gemini call."""
+        session_id = _create_session(tmp_path)
+        server.cancel_events[session_id] = threading.Event()
+        try:
+            resp = client.post(f"/api/{session_id}/mask", json={"rectangles": [], "separators": []})
+            assert resp.status_code == 409
+            mock_pipeline.run_ocr_and_verify.assert_not_called()
+        finally:
+            server.cancel_events.pop(session_id, None)
+
+
+class TestListPuzzlesRobustness:
+    def test_skips_unreadable_file(self, client, tmp_path):
+        _write_puzzle(tmp_path, "good", {
+            "metadata": {"name": "Good"}, "grid": {"cells": []},
+            "clues": {"across": [], "down": []},
+        })
+        (tmp_path / "puzzles" / "bad.json").write_text('{"metadata": {"na')  # truncated write
+
+        resp = client.get("/api/puzzles")
+        assert resp.status_code == 200
+        assert [p["id"] for p in resp.json()] == ["good"]
+
+
+class TestEventLoopNotBlocked:
+    @pytest.mark.asyncio
+    @patch("crosswise.api.server.pipeline")
+    async def test_ocr_does_not_block_other_requests(self, mock_pipeline, client, tmp_path):
+        """Slow OCR runs in a worker thread, so other requests are served meanwhile."""
+        import asyncio
+        import time
+        import httpx
+
+        def slow_ocr(*args, **kwargs):
+            time.sleep(1.0)
+            return {"verification_passed": False, "ocr_clue_count": 0, "grid_slot_count": 0,
+                    "matched_count": 0, "errors": []}
+
+        mock_pipeline.run_ocr_and_verify.side_effect = slow_ocr
+        session_id = _create_session(tmp_path)
+
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            mask = asyncio.create_task(
+                ac.post(f"/api/{session_id}/mask", json={"rectangles": [], "separators": []})
+            )
+            await asyncio.sleep(0.1)  # let the mask request reach the OCR call
+            started = time.monotonic()
+            config = await ac.get("/api/config")
+            assert config.status_code == 200
+            assert time.monotonic() - started < 0.5  # not stuck behind the 1s OCR
+            assert not mask.done()
+            assert (await mask).status_code == 200

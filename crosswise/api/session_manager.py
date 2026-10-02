@@ -4,6 +4,11 @@ from datetime import datetime
 from pathlib import Path
 
 from crosswise.api.models import SessionStatus
+from crosswise.api.storage import write_json_atomic
+
+
+class SessionNotFound(FileNotFoundError):
+    """No session with this ID (the server maps this to a 404)."""
 
 
 class SessionManager:
@@ -27,9 +32,9 @@ class SessionManager:
         # Session IDs are server-generated hex, so a well-behaved client can
         # never trip this — it guards against crafted IDs escaping base_dir.
         if not d.is_relative_to(self.base_dir.resolve()) or d == self.base_dir.resolve():
-            raise FileNotFoundError(f"Session {session_id} not found")
+            raise SessionNotFound(f"Session {session_id} not found")
         if not d.exists():
-            raise FileNotFoundError(f"Session {session_id} not found")
+            raise SessionNotFound(f"Session {session_id} not found")
         return d
 
     def update_status(self, session_id: str, status: SessionStatus, **extra):
@@ -47,12 +52,15 @@ class SessionManager:
         return self._read_session(session_id)
 
     def _session_file(self, session_id: str) -> Path:
-        return self.base_dir / session_id / "session.json"
+        # Through get_session_dir so status reads get the same traversal guard
+        return self.get_session_dir(session_id) / "session.json"
 
     def _read_session(self, session_id: str) -> dict:
-        with open(self._session_file(session_id)) as f:
+        path = self._session_file(session_id)
+        if not path.exists():
+            raise SessionNotFound(f"Session {session_id} not found")
+        with open(path) as f:
             return json.load(f)
 
     def _write_session(self, session_id: str, data: dict):
-        with open(self._session_file(session_id), "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        write_json_atomic(self._session_file(session_id), data, indent=2, default=str)
