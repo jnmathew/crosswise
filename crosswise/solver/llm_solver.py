@@ -310,12 +310,13 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
 
     from crosswise.solver.cost_tracker import get_tracker
 
-    # Opus 5.5 always thinks, and thinking counts toward max_tokens, so leave
-    # room for it on top of the JSON answer.
+    # Opus 5.5 always thinks, and thinking counts toward max_tokens: at high
+    # effort a hard pass can think past 16K and never write its answer
+    # (gauntlet 202). Streaming makes a large limit safe.
     client = anthropic.Anthropic(timeout=300.0)
     request = dict(
         model=model,
-        max_tokens=16000,
+        max_tokens=64000,
         system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
         output_config={"effort": effort},
     )
@@ -337,6 +338,10 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
         logger.error(f"API error in solve_pass {pass_num}: {e}")
         return None  # None signals API error (vs {} for no answers)
 
+    if response.stop_reason == "max_tokens":
+        # Cut off before the answer: a failed pass, not "nothing to commit",
+        # so the caller moves on to the next pass instead of stopping.
+        return None
     text = response_text(response, f"solve_pass_{pass_num}")
     # Strip markdown fences if present
     if text.startswith("```"):
@@ -360,7 +365,7 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
                 continue
         if new_answers is None:
             logger.warning("No parseable JSON found in LLM response")
-            return {}
+            return None
 
     # Validate: correct length, matches pattern, and is in candidates (if we have them)
     validated: Dict[ClueId, Word] = {}
@@ -632,7 +637,7 @@ Return ONLY the JSON object."""
             response = create_message(
                 client,
                 model=model,
-                max_tokens=16000,
+                max_tokens=64000,
                 system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 output_config={"effort": effort},
                 messages=messages,
@@ -784,7 +789,7 @@ List the answers that are wrong: not a real word or phrase, or not a fit for the
         response = create_message(
             client,
             model=model,
-            max_tokens=16000,
+            max_tokens=64000,
             output_config={
                 "effort": effort,
                 "format": {"type": "json_schema", "schema": _REVIEW_SCHEMA},
@@ -865,7 +870,7 @@ Return ONLY a JSON object mapping clue_id to answer."""
             response = create_message(
                 client,
                 model=model,
-                max_tokens=16000,
+                max_tokens=64000,
                 system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 output_config={"effort": effort},
                 tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
@@ -1220,10 +1225,10 @@ def solve_with_llm(
         )
 
         if new_answers is None:
-            logger.warning(f"API error on pass {pass_num} — skipping")
+            logger.warning(f"Pass {pass_num} failed (API error or unusable response) — skipping")
             if progress_callback:
                 progress_callback(pass_num, len(assignment), total,
-                                  warning=f"API error on pass {pass_num}, continuing with partial results")
+                                  warning=f"Pass {pass_num} failed (API error or truncated output), continuing")
             continue
 
         if not new_answers:

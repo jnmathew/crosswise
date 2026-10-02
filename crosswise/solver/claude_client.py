@@ -44,4 +44,6 @@ def response_text(response, label: str = "") -> str:
         category = getattr(response.stop_details, "category", None)
         logger.warning(f"Claude declined {label or 'request'} (category: {category})")
         return ""
+    if response.stop_reason == "max_tokens":
+        logger.warning(f"{label or 'Request'} hit max_tokens; output is truncated")
     return "\n".join(b.text for b in response.content if b.type == "text").strip()
