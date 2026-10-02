@@ -994,12 +994,12 @@ def solve_with_llm(
             progress_callback(pass_num, len(assignment), total)
 
         # Early passes are pattern-driven (proper nouns, forced answers) and
-        # don't need deep reasoning — run them at lower effort to cut token
-        # spend, reserving high effort for the harder late passes.
+        # don't need deep reasoning — run them at low effort (Opus 5.5 at low
+        # comes close to medium), reserving high effort for the late passes.
         new_answers = solve_pass(
             solver_input, clue_text_lookup, candidates,
             assignment, pass_num,
-            effort="medium" if pass_num <= 3 else "high",
+            effort="low" if pass_num <= 3 else "high",
         )
 
         if new_answers is None:

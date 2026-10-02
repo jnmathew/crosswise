@@ -16,12 +16,22 @@ _FALLBACK_MODELS = {OPUS_MODEL, SONNET_MODEL}
 
 
 def create_message(client, **kwargs):
-    """Call the Messages API, opting Opus/Sonnet 5.5 requests into refusal fallback."""
+    """Call the Messages API and return the final message.
+
+    Requests are streamed: 5.5 models think before answering, so a solve pass
+    can run for minutes, and a non-streaming request sits silent on the wire
+    that whole time, exposed to dropped connections. Streaming keeps bytes
+    flowing; ``get_final_message()`` returns the same object ``create`` would.
+    Opus/Sonnet 5.5 requests are also opted into server-side refusal fallback.
+    """
     if kwargs.get("model") in _FALLBACK_MODELS:
-        return client.beta.messages.create(
+        stream = client.beta.messages.stream(
             betas=[_FALLBACK_BETA], fallbacks="default", **kwargs
         )
-    return client.messages.create(**kwargs)
+    else:
+        stream = client.messages.stream(**kwargs)
+    with stream as s:
+        return s.get_final_message()
 
 
 def response_text(response, label: str = "") -> str:
