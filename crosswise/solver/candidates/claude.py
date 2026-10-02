@@ -3,14 +3,17 @@
 Primary LLM generation used by the web pipeline:
 - generate_with_claude: batch candidate generation via Opus or Sonnet
 - ensure_minimum_candidates: pad clues with < 5 candidates via Sonnet
-- generate_with_extended_thinking: Sonnet 4.6 with adaptive thinking for hard clues
+- generate_with_extended_thinking: Sonnet 5.5 with adaptive thinking for hard clues
 """
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from loguru import logger
+
+from crosswise.solver.claude_client import OPUS_MODEL, SONNET_MODEL, create_message, response_text
 
 from .models import (
     ClueInput,
@@ -24,12 +27,37 @@ from .prompts import _parse_response
 if TYPE_CHECKING:
     from crosswise.solver.clue_database import ClueDatabase
 
+# Structured-output schema for candidate batches. Kept fixed (clue IDs are
+# values, not keys) so the API compiles it once and caches it across batches.
+# Without it, 5.5 models at low effort sometimes emit a JSON object, notice a
+# mistake, and append a corrected second object, which breaks parsing.
+_CANDIDATES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "clue_id": {"type": "string"},
+                    "answers": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["clue_id", "answers"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["candidates"],
+    "additionalProperties": False,
+}
+
 
 def generate_with_claude(
     clues: List[ClueInput],
     candidates_per_clue: int = DEFAULT_CANDIDATES_PER_CLUE,
     batch_size: int = 15,
-    model: str = "claude-opus-4-8",
+    model: str = OPUS_MODEL,
+    effort: str = "medium",
 ) -> Dict[str, List[str]]:
     """
     Generate candidates using Anthropic Claude API.
@@ -40,6 +68,9 @@ def generate_with_claude(
         clues: List of ClueInput objects
         candidates_per_clue: Number of candidates per clue
         batch_size: Clues per API call
+        model: Claude model ID
+        effort: Thinking effort; 5.5-generation models always think, so this
+            is the cost/quality dial (Opus 5.5 defaults to medium)
 
     Returns:
         Dict mapping clue_id to list of candidate words
@@ -55,7 +86,7 @@ def generate_with_claude(
         logger.warning("ANTHROPIC_API_KEY not set, skipping Claude generation")
         return {}
 
-    client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
+    client = anthropic.Anthropic(api_key=api_key, timeout=300.0)
     all_candidates: Dict[str, List[str]] = {}
 
     def _process_batch(batch: List[ClueInput]) -> Dict[str, List[str]]:
@@ -80,23 +111,30 @@ Key rules:
 Clues:
 {chr(10).join(clue_lines)}
 
-Respond with ONLY a JSON object mapping clue_id to an array of answers.
-Example: {{"1-across": ["PARIS", "LYONS"], "2-down": ["ECHO", "ARIA"]}}"""
+Return one entry per clue, with its clue_id and its candidate answers."""
 
         try:
             from crosswise.solver.cost_tracker import get_tracker
 
-            response = client.messages.create(
+            response = create_message(
+                client,
                 model=model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}]
+                max_tokens=16000,
+                output_config={
+                    "effort": effort,
+                    "format": {"type": "json_schema", "schema": _CANDIDATES_SCHEMA},
+                },
+                messages=[{"role": "user", "content": prompt}],
             )
             short = "opus" if "opus" in model else "sonnet" if "sonnet" in model else model
             get_tracker().track(response, f"candidates_{short}")
 
-            response_text = response.content[0].text
+            text = response_text(response, f"candidates_{short}")
+            if not text:
+                return {}
+            by_clue = {e["clue_id"]: e["answers"] for e in json.loads(text)["candidates"]}
             clue_ids = [c.clue_id for c in batch]
-            batch_candidates = _parse_response(response_text, clue_ids)
+            batch_candidates = _parse_response(json.dumps(by_clue), clue_ids)
 
             # Filter by length and pattern
             clue_map = {c.clue_id: c for c in batch}
@@ -172,7 +210,8 @@ def ensure_minimum_candidates(
         claude_candidates = generate_with_claude(
             needs_more,
             candidates_per_clue=min_candidates * 3,  # Over-request; length filter drops ~50%
-            model="claude-sonnet-4-6",
+            model=SONNET_MODEL,
+            effort="low",
         )
         for clue_id, cands in claude_candidates.items():
             existing = set(candidates.get(clue_id, []))
@@ -197,7 +236,7 @@ def generate_with_extended_thinking(
     """
     Generate candidates using Claude adaptive thinking for hard clues.
 
-    Uses Sonnet 4.6 with adaptive thinking -- the model reasons through
+    Uses Sonnet 5.5 with adaptive thinking -- the model reasons through
     wordplay, puns, and cryptic clue mechanics before answering, deciding
     how much to think per clue.
 
@@ -254,28 +293,23 @@ Respond with ONLY a JSON object: {{"clue_id": ["BEST", "SECOND", ...], ...}}"""
 
         try:
             logger.info(f"Extended thinking batch {batch_num}/{total_batches} ({len(batch)} clues)...")
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
+            response = create_message(
+                client,
+                model=SONNET_MODEL,
                 max_tokens=16000,
                 thinking={"type": "adaptive"},
                 output_config={"effort": "high"},
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            # Extract text block (skip thinking blocks)
-            response_text = ""
-            for block in response.content:
-                if block.type == "text":
-                    response_text = block.text
-                    break
-
-            if not response_text:
+            text = response_text(response, f"extended_thinking batch {batch_num}")
+            if not text:
                 logger.warning(f"no text response in batch {batch_num}")
                 continue
 
             # Parse JSON response
             clue_ids = [c.clue_id for c in batch]
-            batch_candidates = _parse_response(response_text, clue_ids)
+            batch_candidates = _parse_response(text, clue_ids)
 
             # Convert to ScoredCandidates with length filtering
             clue_map = {c.clue_id: c for c in batch}

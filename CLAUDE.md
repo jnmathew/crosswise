@@ -122,14 +122,15 @@ For extracting crossword clues from newspaper images:
 - Multi-pass architecture: commit high-confidence answers first, propagate crossing letters
 - `solve_pass()` — single-turn Opus call (no web search, no multi-turn continuation)
 - `find_conflict_clusters()` — detects dead-end patterns (crossing letters match no valid word), traces blame to wrong committed answers, groups into connected clusters
-- `resolve_conflict_cluster()` — removes blamed answers from grid, asks LLM to re-solve the cluster jointly with web search available (Anthropic `web_search_20250305`)
+- `resolve_conflict_cluster()` — removes blamed answers from grid, asks LLM to re-solve the cluster jointly with web search available (Anthropic `web_search_20260209`)
 - `propagate_constraints()` — zero-cost logic: auto-commits clues where crossing patterns eliminate all but one candidate; handles fully-constrained patterns via word index + dictionary API + Haiku verification
 - Post-resolution follow-up pass picks up newly-unblocked clues after conflict resolution frees crossing letters
 
 **cost_tracker.py** - API cost tracking:
 - Thread-safe `CostTracker` accumulates costs across all API calls during a solve
-- Tracks input/output tokens, cache write (1.25x) and read (0.1x) tokens, web search ($0.01/query)
-- Pricing: Opus 4 ($15/$75), Sonnet 4 ($3/$15), Haiku 4.5 ($1/$5) per MTok
+- Tracks input/output tokens, cache write (1.25x) and per-model cache read tokens, web search ($0.01/query)
+- Pricing: Opus 5.5 ($4/$20, cache reads 0.05x), Sonnet 5.5 ($2/$10), Haiku 4.5 ($1/$5) per MTok
+- Model IDs live in `crosswise/solver/claude_client.py`; Opus/Sonnet 5.5 calls go through `create_message()` (server-side refusal fallback) and `response_text()` (reads text blocks by type — 5.5 models always think)
 - Per-call logging and phase-grouped summary at end of solve
 
 **generate_hints.py** - AI hint generation:

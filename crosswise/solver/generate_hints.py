@@ -6,6 +6,30 @@ import json
 
 import anthropic
 
+from crosswise.solver.claude_client import SONNET_MODEL, create_message, response_text
+
+# Fixed structured-output schema (compiled once by the API, then cached).
+_HINTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "hints": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "hint": {"type": "string"},
+                    "explanation": {"type": "string"},
+                },
+                "required": ["id", "hint", "explanation"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["hints"],
+    "additionalProperties": False,
+}
+
 
 def load_solution(path: str) -> dict[str, str]:
     """Load solution JSON, handling both flat and nested formats."""
@@ -36,7 +60,7 @@ def merge_answers(puzzle: dict, solution: dict[str, str]) -> dict:
 def generate_hints_batch(
     clues_with_answers: list[dict],
 ) -> list[dict[str, str]]:
-    """Call Claude Opus to generate hints for all solved clues in one batch."""
+    """Call Claude Sonnet to generate hints for all solved clues in one batch."""
     clue_lines = []
     for c in clues_with_answers:
         clue_lines.append(
@@ -47,29 +71,30 @@ def generate_hints_batch(
 1. A **hint** — a brief nudge that helps the solver without giving the answer away. Should be a different angle or association than the original clue.
 2. An **explanation** — a concise explanation of why the answer fits the clue (1-2 sentences).
 
-Return a JSON array with objects having keys: "id", "hint", "explanation".
+Return one entry per clue with its id (e.g. "1-across"), hint, and explanation.
 
 Clues:
 {chr(10).join(clue_lines)}
-
-Respond with ONLY the JSON array, no other text."""
+"""
 
     from crosswise.solver.cost_tracker import get_tracker
 
     client = anthropic.Anthropic(timeout=120.0)
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
+    # Sonnet 5.5 thinks by default; low effort suits this content-generation
+    # task, and max_tokens leaves room for thinking on top of the JSON.
+    response = create_message(
+        client,
+        model=SONNET_MODEL,
+        max_tokens=16000,
+        output_config={
+            "effort": "low",
+            "format": {"type": "json_schema", "schema": _HINTS_SCHEMA},
+        },
         messages=[{"role": "user", "content": prompt}],
     )
     get_tracker().track(response, "hints")
 
-    text = response.content[0].text.strip()
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        if text.endswith("```"):
-            text = text[: text.rfind("```")]
-        text = text.strip()
-
-    return json.loads(text)
+    text = response_text(response, "hints")
+    if not text:
+        raise RuntimeError("Hint generation was declined")
+    return json.loads(text)["hints"]

@@ -11,6 +11,8 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from crosswise.solver.claude_client import HAIKU_MODEL
+
 from .models import ClueInput
 
 
@@ -145,12 +147,12 @@ def web_search_prepass(
             messages = [{"role": "user", "content": prompt}]
 
             response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=HAIKU_MODEL,
                 max_tokens=200,
                 messages=messages,
                 tools=tools,
             )
-            tracker.track(response, "web_prepass", model="claude-haiku-4-5-20251001")
+            tracker.track(response, "web_prepass", model=HAIKU_MODEL)
 
             # Handle pause_turn -- follow up until we get a final answer (max 3 continuations)
             for _ in range(3):
@@ -159,12 +161,12 @@ def web_search_prepass(
                 messages.append({"role": "assistant", "content": response.content})
                 messages.append({"role": "user", "content": f"Reply with ONLY the {clue.length}-letter answer in uppercase."})
                 response = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                    model=HAIKU_MODEL,
                     max_tokens=200,
                     messages=messages,
                     tools=tools,
                 )
-                tracker.track(response, "web_prepass_cont", model="claude-haiku-4-5-20251001")
+                tracker.track(response, "web_prepass_cont", model=HAIKU_MODEL)
 
             # Extract answer from response
             text_parts = [b.text for b in response.content if hasattr(b, "text")]

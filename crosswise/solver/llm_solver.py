@@ -19,6 +19,7 @@ import anthropic
 import requests
 from loguru import logger
 
+from crosswise.solver.claude_client import HAIKU_MODEL, OPUS_MODEL, create_message, response_text
 from crosswise.solver.models import SolverInput
 
 
@@ -220,7 +221,7 @@ def solve_pass(
     candidates: Dict[str, List[str]],
     assignment: Dict[ClueId, Word],
     pass_num: int,
-    model: str = "claude-opus-4-8",
+    model: str = OPUS_MODEL,
     effort: str = "high",
 ) -> Dict[ClueId, Word]:
     """Run one LLM solve pass. Returns new assignments from this pass."""
@@ -300,12 +301,15 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
 
     from crosswise.solver.cost_tracker import get_tracker
 
-    client = anthropic.Anthropic(timeout=120.0)
+    # Opus 5.5 always thinks, and thinking counts toward max_tokens, so leave
+    # room for it on top of the JSON answer.
+    client = anthropic.Anthropic(timeout=300.0)
 
     try:
-        response = client.messages.create(
+        response = create_message(
+            client,
             model=model,
-            max_tokens=4096,
+            max_tokens=16000,
             system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
             output_config={"effort": effort},
             messages=[{"role": "user", "content": prompt}],
@@ -316,7 +320,7 @@ Return ONLY the JSON object, no other text. If you're not confident about any, r
 
     get_tracker().track(response, f"solve_pass_{pass_num}")
 
-    text = response.content[0].text.strip()
+    text = response_text(response, f"solve_pass_{pass_num}")
     # Strip markdown fences if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
@@ -492,7 +496,7 @@ def resolve_conflict_cluster(
     candidates: Dict[str, List[str]],
     assignment: Dict[ClueId, Word],
     cluster: Dict,
-    model: str = "claude-opus-4-8",
+    model: str = OPUS_MODEL,
     effort: str = "high",
 ) -> Dict[ClueId, Word]:
     """Ask the LLM to re-solve a conflict cluster.
@@ -590,11 +594,11 @@ Return ONLY the JSON object."""
 
     from crosswise.solver.cost_tracker import get_tracker
 
-    client = anthropic.Anthropic(timeout=120.0)
+    client = anthropic.Anthropic(timeout=300.0)
 
     # web_search_20260209 adds dynamic filtering (Claude filters results before
     # they hit context — better accuracy, fewer tokens). Requires Opus 4.6+/
-    # Sonnet 4.6, which the solver model (Opus 4.8) satisfies.
+    # Sonnet 4.6, which the solver model (Opus 5.5) satisfies.
     tools = [{
         "type": "web_search_20260209",
         "name": "web_search",
@@ -607,9 +611,10 @@ Return ONLY the JSON object."""
     tracker = get_tracker()
     try:
         for _turn in range(4):
-            response = client.messages.create(
+            response = create_message(
+                client,
                 model=model,
-                max_tokens=4096,
+                max_tokens=16000,
                 system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 output_config={"effort": effort},
                 messages=messages,
@@ -634,8 +639,7 @@ Return ONLY the JSON object."""
         return None  # None signals API error
 
     # Extract text from mixed content blocks
-    text_parts = [b.text for b in response.content if hasattr(b, "text")]
-    text = "\n".join(text_parts).strip()
+    text = response_text(response, "conflict_resolution")
 
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
@@ -776,11 +780,11 @@ def _dictionary_and_haiku_confirm(word: str, clue_text: str) -> bool:
         prompt += '\n\nIs this answer correct for this crossword clue? Reply with ONLY "yes" or "no".'
 
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=HAIKU_MODEL,
             max_tokens=10,
             messages=[{"role": "user", "content": prompt}],
         )
-        get_tracker().track(response, "verify_word", model="claude-haiku-4-5-20251001")
+        get_tracker().track(response, "verify_word", model=HAIKU_MODEL)
 
         answer = response.content[0].text.strip().lower()
         confirmed = answer.startswith("yes")

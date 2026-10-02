@@ -6,7 +6,8 @@ then prints a summary breakdown by phase.
 
 Accounts for:
 - Base input/output token costs
-- Cache write tokens (1.25x base input) and cache read tokens (0.1x base input)
+- Cache write tokens (1.25x base input) and cache read tokens (per-model
+  multiplier: 0.1x base input on most models, 0.05x on Opus 5.5)
 - Web search per-query costs ($0.01/search)
 """
 
@@ -17,12 +18,18 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 
-# Pricing per million tokens: (input_cost, output_cost)
+# Pricing per million tokens: (input_cost, output_cost, cache_read_multiplier).
+# Older models stay listed because refusal fallbacks can route a request to them.
 MODEL_PRICING: Dict[str, tuple] = {
-    "claude-opus-4-8": (5.0, 25.0),
-    "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-haiku-4-5-20251001": (1.0, 5.0),
+    "claude-opus-5-5": (4.0, 20.0, 0.05),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.1),
+    "claude-haiku-4-5-20251001": (1.0, 5.0, 0.1),
+    "claude-opus-5": (5.0, 25.0, 0.1),
+    "claude-opus-4-8": (5.0, 25.0, 0.1),
+    "claude-sonnet-5": (2.0, 10.0, 0.1),
+    "claude-sonnet-4-6": (3.0, 15.0, 0.1),
 }
+_DEFAULT_PRICING = MODEL_PRICING["claude-opus-5-5"]
 
 # Web search: $10 per 1,000 searches
 WEB_SEARCH_COST_PER_QUERY = 0.01
@@ -82,14 +89,14 @@ class CostTracker:
                     pricing = val
                     break
         if pricing is None:
-            pricing = (5.0, 25.0)  # default to Opus 4.8 pricing (conservative)
+            pricing = _DEFAULT_PRICING
 
-        input_cost_per_m, output_cost_per_m = pricing
+        input_cost_per_m, output_cost_per_m, cache_read_mult = pricing
         cost = (
             input_tokens / 1_000_000 * input_cost_per_m +
             output_tokens / 1_000_000 * output_cost_per_m +
             cache_write_tokens / 1_000_000 * input_cost_per_m * 1.25 +
-            cache_read_tokens / 1_000_000 * input_cost_per_m * 0.1 +
+            cache_read_tokens / 1_000_000 * input_cost_per_m * cache_read_mult +
             web_searches * WEB_SEARCH_COST_PER_QUERY
         )
 

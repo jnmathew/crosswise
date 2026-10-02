@@ -65,7 +65,7 @@ These results come from the 2026-03-05 test run (`internal_dev/gauntlet/results.
 | Iterative solving | `claude-opus-4-20250514` |
 | Hint generation | `claude-sonnet-4-20250514` |
 
-> **The current code defaults differ.** As of 2026-05-30 the pipeline points at Opus 4.8 (`claude-opus-4-8`), Sonnet 4.6 (`claude-sonnet-4-6`), and Gemini 3.5 Flash (`gemini-3.5-flash`). The figures above reflect the 2026-03-05 model set only and have not been re-validated against the newer models.
+> **The current code defaults differ.** As of 2026-10-01 the pipeline points at Opus 5.5 (`claude-opus-5-5`), Sonnet 5.5 (`claude-sonnet-5-5`), Haiku 4.5 (`claude-haiku-4-5-20251001`), and Gemini 3.5 Flash (`gemini-3.5-flash`). The figures above reflect the 2026-03-05 model set only and have not been re-validated against the newer models.
 
 ## Demo
 
