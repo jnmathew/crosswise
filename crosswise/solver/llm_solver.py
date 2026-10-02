@@ -288,8 +288,10 @@ Be more aggressive now — the crossing letters give you strong constraints."""
     else:
         instruction = f"""This is pass {pass_num}. Most of the grid should be filled.
 For remaining clues, use ALL available crossing letters and your best judgment.
-At this stage it's better to commit a reasonable answer than leave blanks.
-Only skip clues where you genuinely have no idea."""
+Commit an answer only if it is a real word or phrase that fits its clue. If the
+crossing letters force something that isn't, leave that clue out: a blank is
+re-solved later, together with the crossing answers that may be wrong, while a
+forced non-word locks those mistakes in."""
 
     prompt = f"""{instruction}
 
@@ -692,6 +694,203 @@ Return ONLY the JSON object."""
     return validated
 
 
+_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "suspects": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "clue_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["clue_id", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["suspects"],
+    "additionalProperties": False,
+}
+
+
+def _parse_answer_json(text: str) -> Optional[Dict[str, str]]:
+    """Parse a clue_id -> answer JSON object from model text.
+
+    Strips markdown fences, then falls back to the last flat JSON object in
+    the text (narration around web searches can precede the answer).
+    """
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1]
+        if "```" in text:
+            text = text[:text.rfind("```")]
+        text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for candidate in reversed(re.findall(r'\{[^{}]*\}', text)):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def find_suspect_answers(
+    solver_input: SolverInput,
+    clue_text_lookup: Dict[str, str],
+    candidates: Dict[str, List[str]],
+    assignment: Dict[ClueId, Word],
+    model: str = OPUS_MODEL,
+    effort: str = "high",
+) -> Dict[ClueId, str]:
+    """Flag committed answers that are likely wrong. Returns clue_id -> reason.
+
+    Crossing agreement is the only check every answer goes through, so a
+    wrong but self-consistent cluster survives a "complete" solve (gauntlet
+    101: CRABDIP forced REI and the non-word BULISH). Two checks:
+    1. Non-words: not in the word index and never proposed as a candidate
+       for that clue (free).
+    2. One review call over the whole filled grid.
+    """
+    from crosswise.solver.cost_tracker import get_tracker
+    from crosswise.solver.word_index import get_word_index
+
+    word_index = get_word_index()
+    suspects: Dict[ClueId, str] = {}
+    for cid, word in assignment.items():
+        proposed = {c.upper() for c in candidates.get(cid, [])}
+        if not word_index.contains(word) and word not in proposed:
+            suspects[cid] = "not a known word, and never proposed as a candidate"
+
+    answer_lines = [
+        f'{cid}: "{clue_text_lookup.get(cid, "")}" = {word}'
+        for cid, word in sorted(assignment.items())
+    ]
+    prompt = f"""Review this crossword fill. Every answer agrees with its crossing letters, but a wrong answer can still get in when the answers crossing it are wrong too.
+
+## Grid
+{build_grid_state(solver_input, assignment)}
+
+## Answers
+{chr(10).join(answer_lines)}
+
+List the answers that are wrong: not a real word or phrase, or not a fit for their clue. Crossword answers are often abbreviations, partial phrases, foreign words, puns, or wordplay, so flag only answers you believe are actually wrong, and say why. Return an empty list if every answer fits."""
+
+    client = anthropic.Anthropic(timeout=300.0)
+    try:
+        response = create_message(
+            client,
+            model=model,
+            max_tokens=16000,
+            output_config={
+                "effort": effort,
+                "format": {"type": "json_schema", "schema": _REVIEW_SCHEMA},
+            },
+            messages=[{"role": "user", "content": prompt}],
+        )
+        get_tracker().track(response, "verify_review")
+        text = response_text(response, "verify_review")
+        for item in json.loads(text)["suspects"] if text else []:
+            if item["clue_id"] in assignment:
+                suspects.setdefault(item["clue_id"], item["reason"])
+    except Exception as e:
+        logger.error(f"API error in answer review: {e}")
+
+    return suspects
+
+
+def resolve_suspect_answers(
+    solver_input: SolverInput,
+    clue_text_lookup: Dict[str, str],
+    candidates: Dict[str, List[str]],
+    assignment: Dict[ClueId, Word],
+    suspects: Dict[ClueId, str],
+    model: str = OPUS_MODEL,
+    effort: str = "high",
+) -> Dict[ClueId, Word]:
+    """Clear suspect answers and every answer crossing them, then re-solve jointly.
+
+    The crossers are cleared too because they forced the suspect's letters;
+    keeping them would force the same answer back. Clues the model can't
+    refill confidently stay blank. Returns the new assignment, or the
+    original one on an API error.
+    """
+    from crosswise.solver.candidates.models import _matches_pattern
+    from crosswise.solver.cost_tracker import get_tracker
+
+    cleared = set(suspects)
+    for cid in suspects:
+        for cell in solver_input.clue_cells[cid]:
+            cleared.update(solver_input.cell_to_clues.get(cell, []))
+    kept = {cid: w for cid, w in assignment.items() if cid not in cleared}
+    patterns = extract_patterns(solver_input, kept)
+
+    clue_lines = []
+    for cid in sorted(cleared):
+        length = solver_input.clue_length(cid)
+        pattern = patterns.get(cid, "_" * length)
+        matching = [
+            c.upper() for c in candidates.get(cid, [])
+            if _matches_pattern(c.upper(), pattern)
+        ][:12]
+        cand_str = f" candidates=[{', '.join(matching)}]" if matching else ""
+        was = f" (was {assignment[cid]})" if cid in assignment else ""
+        why = f" FLAGGED: {suspects[cid]}" if cid in suspects else ""
+        clue_lines.append(
+            f'{cid}: "{clue_text_lookup.get(cid, "")}" ({length} letters) '
+            f'pattern={pattern}{cand_str}{was}{why}'
+        )
+
+    prompt = f"""## Re-check flagged answers
+A review of the filled grid flagged some answers as likely wrong. They, and every answer crossing them, have been cleared so the group can be re-solved together.
+
+### Clues to re-solve
+{chr(10).join(clue_lines)}
+
+### Grid (cleared cells shown as _)
+{build_grid_state(solver_input, kept)}
+
+Re-solve these clues so that every answer is a real word or phrase that fits its clue, matches its pattern, and agrees with the others at shared cells. A previous answer may well have been right; keep it if it fits. Use web search to verify proper nouns or obscure terms. Leave out any clue you can't answer confidently.
+
+Return ONLY a JSON object mapping clue_id to answer."""
+
+    client = anthropic.Anthropic(timeout=300.0)
+    messages = [{"role": "user", "content": prompt}]
+    tracker = get_tracker()
+    try:
+        for _turn in range(4):
+            response = create_message(
+                client,
+                model=model,
+                max_tokens=16000,
+                system=[{"type": "text", "text": SKILL_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                output_config={"effort": effort},
+                tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
+                messages=messages,
+            )
+            tracker.track(response, "verify_resolve")
+            if response.stop_reason != "pause_turn":
+                break
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": "Continue. Return the JSON answer."})
+    except Exception as e:
+        logger.error(f"API error re-solving suspect answers: {e}")
+        return assignment
+
+    new_answers = _parse_answer_json(response_text(response, "verify_resolve")) or {}
+    trial = dict(kept)
+    for cid, word in new_answers.items():
+        if cid not in cleared or not isinstance(word, str):
+            continue
+        word = word.upper()
+        if _matches_pattern(word, patterns.get(cid, "_" * solver_input.clue_length(cid))):
+            trial[cid] = word
+    return validate_assignment(solver_input, trial)
+
+
 def prefill_from_db(
     solver_input: SolverInput,
     candidates: Dict[str, List[str]],
@@ -1009,13 +1208,14 @@ def solve_with_llm(
         if progress_callback:
             progress_callback(pass_num, len(assignment), total)
 
-        # Early passes are pattern-driven (proper nouns, forced answers) and
-        # don't need deep reasoning — run them at low effort (Opus 5.5 at low
-        # comes close to medium), reserving high effort for the late passes.
+        # Pass 1 seeds every later pass with crossing letters, so a wrong
+        # commit there propagates: run it at medium. Passes 2-3 are checked by
+        # those crossings and run at low; late passes get high.
+        effort = "medium" if pass_num == 1 else "low" if pass_num <= 3 else "high"
         new_answers = solve_pass(
             solver_input, clue_text_lookup, candidates,
             assignment, pass_num,
-            effort="low" if pass_num <= 3 else "high",
+            effort=effort,
             web_search=pass_num >= 4 and settings.SOLVER_WEB_SEARCH,
         )
 
@@ -1177,6 +1377,43 @@ def solve_with_llm(
                         solve_trace[cid]["solved_by"] = "constraint_prop_final"
             if trace_global:
                 trace_global("constraint_prop_final", f"+{len(final_commits)} from final propagation, total {len(assignment)}/{total}")
+
+    # Phase: verify the fill. Crossing agreement can't catch a wrong but
+    # self-consistent cluster, so review every committed answer and re-solve
+    # whatever is flagged, together with the answers crossing it.
+    if assignment:
+        suspects = find_suspect_answers(solver_input, clue_text_lookup, candidates, assignment)
+        if suspects:
+            elapsed = time.time() - t0
+            logger.info(f"[{elapsed:.1f}s] Verification flagged {len(suspects)}: " + "; ".join(
+                f"{cid}={assignment[cid]} ({why})" for cid, why in suspects.items()))
+            before = dict(assignment)
+            assignment = resolve_suspect_answers(
+                solver_input, clue_text_lookup, candidates, assignment, suspects,
+            )
+            # Refill anything the re-solve left blank where crossings now force it
+            propagate_constraints(
+                solver_input, candidates, assignment,
+                candidate_scores=candidate_scores,
+                clue_text_lookup=clue_text_lookup,
+            )
+            changed = [cid for cid in assignment if before.get(cid) != assignment[cid]]
+            blanked = [cid for cid in before if cid not in assignment]
+            elapsed = time.time() - t0
+            logger.info(f"[{elapsed:.1f}s] Verification re-solve: " + (", ".join(
+                f"{cid} {before.get(cid)}->{assignment[cid]}" for cid in changed) or "no changes")
+                + (f"; left blank: {', '.join(blanked)}" if blanked else "")
+                + f"; total {len(assignment)}/{total}")
+            if solve_trace:
+                for cid in changed:
+                    solve_trace[cid]["solved_by"] = "verify_resolve"
+                for cid in blanked:
+                    solve_trace[cid]["solved_by"] = None
+            if trace_global:
+                trace_global("verify", f"flagged {len(suspects)}, changed {len(changed)}, "
+                             f"blanked {len(blanked)}, total {len(assignment)}/{total}")
+        elif trace_global:
+            trace_global("verify", "no suspect answers")
 
     elapsed = time.time() - t0
     logger.info(f"[{elapsed:.1f}s] LLM solver done: {len(assignment)}/{total}")
