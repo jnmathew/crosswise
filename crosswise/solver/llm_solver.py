@@ -795,7 +795,7 @@ def find_suspect_answers(
 ## Answers
 {chr(10).join(answer_lines)}
 
-List the answers that are wrong: not a real word or phrase, or not a fit for their clue. Crossword answers are often abbreviations, partial phrases, foreign words, puns, or wordplay, so flag only answers you believe are actually wrong, and say why. Return an empty list if every answer fits.{unknown_note}"""
+List the answers that are wrong: not a real word or phrase, or not a fit for their clue. Crossword answers are often abbreviations, partial phrases, foreign words, puns, or wordplay, so flag only answers you believe are actually wrong, and say why. If an answer is wrong because a crossing answer forced its letters, flag that crossing answer too, even if it fits its own clue: wrong answers come in self-consistent groups, and fixing one member alone leaves the rest in place. Return an empty list if every answer fits.{unknown_note}"""
 
     client = anthropic.Anthropic(timeout=300.0)
     try:
@@ -907,6 +907,59 @@ Return ONLY a JSON object mapping clue_id to answer."""
         if _matches_pattern(word, patterns.get(cid, "_" * solver_input.clue_length(cid))):
             trial[cid] = word
     return validate_assignment(solver_input, trial)
+
+
+def verify_and_repair(
+    solver_input: SolverInput,
+    clue_text_lookup: Dict[str, str],
+    candidates: Dict[str, List[str]],
+    assignment: Dict[ClueId, Word],
+    candidate_scores: Optional[Dict[str, Dict[str, float]]] = None,
+) -> Tuple[Dict[ClueId, Word], Dict[ClueId, str]]:
+    """Review the fill, re-solve suspect answers, and repair any dead ends left.
+
+    Returns (new assignment, suspects). If the re-solve keeps a wrong crossing
+    answer, the suspect's pattern becomes impossible and it is left blank;
+    that blank is a dead end, which conflict resolution is built for: it
+    blames the crossing answers that supplied the letters and re-solves them.
+    """
+    suspects = find_suspect_answers(solver_input, clue_text_lookup, candidates, assignment)
+    if not suspects:
+        return assignment, suspects
+
+    assignment = resolve_suspect_answers(
+        solver_input, clue_text_lookup, candidates, assignment, suspects,
+    )
+    propagate_constraints(
+        solver_input, candidates, assignment,
+        candidate_scores=candidate_scores, clue_text_lookup=clue_text_lookup,
+    )
+
+    if len(assignment) < len(solver_input.clue_cells):
+        for cluster in find_conflict_clusters(solver_input, assignment, clue_text_lookup):
+            new_answers = resolve_conflict_cluster(
+                solver_input, clue_text_lookup, candidates, assignment, cluster,
+            )
+            if new_answers:
+                blamed = {b["clue_id"] for b in cluster["blamed"]}
+                trial = {cid: w for cid, w in assignment.items() if cid not in blamed}
+                trial.update(new_answers)
+                assignment = validate_assignment(solver_input, trial)
+        propagate_constraints(
+            solver_input, candidates, assignment,
+            candidate_scores=candidate_scores, clue_text_lookup=clue_text_lookup,
+        )
+
+    if len(assignment) < len(solver_input.clue_cells):
+        # Last chance for clues the repair left blank
+        new_answers = solve_pass(
+            solver_input, clue_text_lookup, candidates, assignment,
+            pass_num=99, effort="high", web_search=settings.SOLVER_WEB_SEARCH,
+        )
+        if new_answers:
+            assignment = validate_assignment(solver_input, {**assignment, **new_answers})
+
+    return assignment, suspects
 
 
 def prefill_from_db(
@@ -1400,21 +1453,15 @@ def solve_with_llm(
     # self-consistent cluster, so review every committed answer and re-solve
     # whatever is flagged, together with the answers crossing it.
     if assignment:
-        suspects = find_suspect_answers(solver_input, clue_text_lookup, candidates, assignment)
+        before = dict(assignment)
+        assignment, suspects = verify_and_repair(
+            solver_input, clue_text_lookup, candidates, assignment,
+            candidate_scores=candidate_scores,
+        )
         if suspects:
             elapsed = time.time() - t0
             logger.info(f"[{elapsed:.1f}s] Verification flagged {len(suspects)}: " + "; ".join(
-                f"{cid}={assignment[cid]} ({why})" for cid, why in suspects.items()))
-            before = dict(assignment)
-            assignment = resolve_suspect_answers(
-                solver_input, clue_text_lookup, candidates, assignment, suspects,
-            )
-            # Refill anything the re-solve left blank where crossings now force it
-            propagate_constraints(
-                solver_input, candidates, assignment,
-                candidate_scores=candidate_scores,
-                clue_text_lookup=clue_text_lookup,
-            )
+                f"{cid}={before[cid]} ({why})" for cid, why in suspects.items()))
             changed = [cid for cid in assignment if before.get(cid) != assignment[cid]]
             blanked = [cid for cid in before if cid not in assignment]
             elapsed = time.time() - t0
