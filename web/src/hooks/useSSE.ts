@@ -18,7 +18,7 @@ export function useSSE(url: string | null) {
     source.onmessage = (event) => {
       const progress: SolveProgress = JSON.parse(event.data);
       setData(progress);
-      if (progress.stage === 'complete' || progress.stage === 'failed' || progress.stage === 'verification_failed') {
+      if (['complete', 'failed', 'verification_failed', 'cancelled'].includes(progress.stage)) {
         setDone(true);
         source.close();
       }

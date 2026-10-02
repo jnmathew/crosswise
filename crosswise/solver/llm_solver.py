@@ -826,6 +826,9 @@ def propagate_constraints(
     word_index = get_word_index()
 
     new_commits: Dict[ClueId, Word] = {}
+    # (clue_id, word) pairs verification already rejected; the outer loop
+    # revisits every forced pattern each round, so skip re-asking Haiku.
+    rejected: set = set()
     changed = True
 
     while changed:
@@ -864,8 +867,12 @@ def propagate_constraints(
                         logger.debug(f"{cid} = {pattern} (fully constrained, in candidates)")
                 else:
                     # Word NOT in candidates — use dictionary + Haiku to verify it fits the clue
+                    if (cid, pattern) in rejected:
+                        continue
                     clue_text = clue_text_lookup.get(cid, "") if clue_text_lookup else ""
                     confirmed = _dictionary_and_haiku_confirm(pattern, clue_text)
+                    if not confirmed:
+                        rejected.add((cid, pattern))
                     if confirmed:
                         trial = {**assignment, cid: pattern}
                         validated = validate_assignment(solver_input, trial)
